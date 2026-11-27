@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { contactShadow } from './avatar';
 
 export interface MowerModel {
   /** Positioned and turned by the game (via poseBody). */
@@ -149,6 +150,10 @@ export function buildMower(colors: MowerColors = PLAYER_COLORS): MowerModel {
     body.add(tyre, hub);
     wheels.push(tyre);
   }
+  // a soft blob under the deck so it reads as sitting on the grass in bright sun
+  const blob = contactShadow(1.6, 0.34);
+  blob.position.y = 0.012;
+  root.add(blob);
   root.traverse((o) => { if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   return { root, body, wheels, blade, chute: new THREE.Vector3(1.15, 0.25, 0.15), exhaust, bladeLamp, pipeTip };
 }

@@ -195,7 +195,7 @@ export class Game {
     this.canModel = buildFuelCan();
     this.canModel.visible = false;
     this.world.scene.add(this.canModel);
-    this.cam = new FollowCamera(this.engine.camera, { offset: new THREE.Vector3(0, 14.5, 7.5), boostFov: 6 }, this.engine.syncProjection);
+    this.cam = new FollowCamera(this.engine.camera, { offset: new THREE.Vector3(0, 13.2, 7.0), boostFov: 6 }, this.engine.syncProjection);
     this.controls = new Input({ capture: () => this.phase === 'play', onKey: this.onKey });
     new TouchStick(container, this.controls);
     this.popups = new Popups(container);
@@ -639,6 +639,11 @@ export class Game {
     if (this.riding) this.sfx.drone(0.45 + frac * 0.4 + Math.min(0.3, cutNow * 0.05), frac * (this.boost ? 1.3 : 1) + Math.min(0.5, cutNow * 0.06));
     else this.sfx.drone(0, 0);
     this.cam.update(dt, m.x, m.z, m.vx, m.vz, this.boost);
+    // on foot the camera comes in close; riding it sits back a little
+    const wantY = this.riding ? 13.2 : 8.4, wantZ = this.riding ? 7.0 : 4.9;
+    const o = this.cam.o.offset;
+    o.y += (wantY - o.y) * Math.min(1, dt * 3);
+    o.z += (wantZ - o.z) * Math.min(1, dt * 3);
   }
 
   // ---------------------------------------------------------------- on foot

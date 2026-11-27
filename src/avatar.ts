@@ -112,6 +112,25 @@ export function animateWalker(w: WalkerModel, dt: number, speed: number, moving:
   w.head.rotation.y = Math.sin(t * 0.6) * 0.12 * (1 - k);
 }
 
+/** A soft blob shadow to ground a small object on the grass. */
+export function contactShadow(radius = 0.5, opacity = 0.3) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d')!;
+  const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grd.addColorStop(0, `rgba(0,0,0,${opacity})`);
+  grd.addColorStop(0.6, `rgba(0,0,0,${opacity * 0.55})`);
+  grd.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grd;
+  g.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(radius * 2, radius * 2), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
+  m.rotation.x = -Math.PI / 2;
+  m.renderOrder = 2;
+  return m;
+}
+
 /** A red jerry can, held on the mower's trailer or carried on foot. */
 export function buildFuelCan() {
   const g = new THREE.Group();
