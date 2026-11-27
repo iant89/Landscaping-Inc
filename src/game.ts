@@ -339,6 +339,8 @@ export class Game {
     this.sfx.unlock();
     this.money = 30; this.rep = 3; this.day = 1; this.up = freshUp(); this.fuel = this.fuelMax;
     this.canFuel = this.fuelMax * CAN_FRACTION;
+    this.tool = null;
+    this.toolFuel = this.toolFuelMax;
     this.blades = true;
     this.lots = this.world.lots.map(() => this.freshLot());
     this.week = {};
@@ -894,10 +896,13 @@ export class Game {
     }
     if (live) this.squash.update(dt);
     const running = live && this.phase !== 'tow';
-    // the mower: driven, parked, or strapped to the trailer
+    // the mower: driven, parked, or strapped to the trailer. The seat is only occupied when you're
+    // in it (and obviously never when the mower is shut away on the trailer).
+    this.model.driver.visible = this.mounted === 'mower' && !this.mowerLoaded;
     if (this.mowerLoaded) {
       // strapped across the trailer deck, wheels turned in
       this.model.root.visible = this.trailerModel.root.visible;
+      this.model.driver.visible = false;
       this.model.root.position.set(this.trailer.x, 0.6, this.trailer.z);
       this.model.root.rotation.y = this.trailer.yaw + Math.PI / 2;
       this.model.body.position.y = 0;
@@ -936,7 +941,8 @@ export class Game {
       if (onFoot) {
         poseBody(w.root, w.body, this.feet, this.squash);
         animateWalker(w, dt, this.feet.speed, this.phase === 'play', t);
-        this.poseTool(dt, t);
+        // carrying something keeps that arm up out of the walk cycle
+        if (this.tool) this.poseTool(dt, t);
       } else if (this.toolModel) this.toolModel.root.visible = false;
     }
     if (this.phase !== 'play') {
@@ -1159,19 +1165,32 @@ export class Game {
       }
       this.tutorialFire('blades');
     }
-    // step out to the left, or further out if that side is tight against something
+    // Step out beside the machine. The mower is a collider, so let the walker settle against it and
+    // accept whichever side actually gets you clear of it — the old check only asked whether you had
+    // moved away from the seat point, which passed while you were still standing inside the mower.
     const rx = Math.cos(m.yaw), rz = -Math.sin(m.yaw);
-    const R = m.o.radius + this.feet.o.radius + 0.15;
+    const R = m.o.radius + this.feet.o.radius + 0.25;
     const seat = rig ? this.rigMover : this.mover;
     this.mounted = null;
-    const spots: [number, number][] = [[rx * R, rz * R], [-rx * R, -rz * R], [rx * R * 2, rz * R * 2], [0, -R * 2]];
+    const need = m.o.radius + this.feet.o.radius * 0.9;
+    const spots: [number, number][] = [[rx * R, rz * R], [-rx * R, -rz * R], [rx * R * 1.7, rz * R * 1.7], [-rx * R * 1.7, -rz * R * 1.7], [0, -R * 2]];
     let placed = false;
     for (const [dx, dz] of spots) {
       this.feet.place(seat.x + dx, seat.z + dz, seat.yaw);
       this.feet.collide(this.world);
-      if (Math.hypot(this.feet.x - seat.x, this.feet.z - seat.z) > m.o.radius * 0.85) { placed = true; break; }
+      if (Math.hypot(this.feet.x - seat.x, this.feet.z - seat.z) >= need) { placed = true; break; }
     }
-    if (!placed) this.feet.place(seat.x + rx * R, seat.z + rz * R, seat.yaw);
+    if (!placed) {
+      // nowhere clear: step out anyway, as far from the machine as the free side allows
+      let best = { x: seat.x + rx * R, z: seat.z + rz * R }, bestD = -1;
+      for (const [dx, dz] of spots) {
+        this.feet.place(seat.x + dx, seat.z + dz, seat.yaw);
+        this.feet.collide(this.world);
+        const d = Math.hypot(this.feet.x - seat.x, this.feet.z - seat.z);
+        if (d > bestD) { bestD = d; best = { x: this.feet.x, z: this.feet.z }; }
+      }
+      this.feet.place(best.x, best.z, seat.yaw);
+    }
     this.squash.reset();
     this.squash.jump(2.6);
     this.sfx.dismount();
@@ -1337,20 +1356,30 @@ export class Game {
   private toolTankTopUp(dt: number) {
     if (this.toolFuel >= this.toolFuelMax) return;
     const near = Math.hypot(this.feet.x - this.trailer.x, this.feet.z - this.trailer.z);
-    if (near > 4.5) return;
+    if (near > 7) return;
     this.toolFuel = Math.min(this.toolFuelMax, this.toolFuel + (this.toolFuelMax / 8) * dt);
   }
 
   /** Take a tool in hand (or put it away). */
   private pickTool(id: ToolId | null, quiet = false) {
     this.tool = id;
-    if (this.toolModel) { this.world.scene.remove(this.toolModel.root); this.toolModel = null; }
+    // take the old tool off the hand itself: removing it from the scene would leave it parented to
+    // the arm, so every swap stacked another model on the walker's hand
+    if (this.toolModel) {
+      this.toolModel.root.parent?.remove(this.toolModel.root);
+      this.toolModel = null;
+    }
+    this.toolActive = false;
+    if (!id) { this.walker.armR.rotation.set(0, 0, -0.08); }
     if (id) {
+      // a tool handed to you always comes with a usable tank
+      if (this.toolFuel <= 1) this.toolFuel = this.toolFuelMax;
       this.toolModel = buildTool(id);
       const arm = this.walker.armR;
       arm.add(this.toolModel.root);
-      this.toolModel.root.position.set(0, -0.5, 0.06);
-      this.toolModel.root.rotation.set(-0.35, 0, 0);
+      // out in front of the hand and tilted away from the body, so the model reads at a glance
+      this.toolModel.root.position.set(-0.16, -0.48, 0.22);
+      this.toolModel.root.rotation.set(-0.5, 0.5, 0.18);
       this.sfx.mount();
       if (!quiet) this.hud.toast(`${toolDef(id).icon} ${toolDef(id).name} in hand · ${toolDef(id).desc}`, 'good', 3200);
     } else if (!quiet) this.sfx.dismount();
@@ -1418,6 +1447,19 @@ export class Game {
     if (!tm) return;
     tm.root.visible = true;
     const on = this.toolActive && this.toolFuel > 0;
+    // the arm carries the tool: raised and steady when it runs, hanging low when it's off
+    const arm = this.walker.armR;
+    arm.rotation.x = -0.9 + (on ? 0 : 0.25);
+    arm.rotation.z = -0.32;
+    // an empty tank sputters instead of spinning: tell the player why nothing is happening
+    if (this.toolActive && !on && this.toolFuel <= 0) {
+      this.toolT -= dt;
+      if (this.toolT <= 0) {
+        this.toolT = 1.6;
+        this.sfx.sputter();
+        this.hud.toast('🛢️ That tool is out of fuel — top it up at the trailer.', 'bad', 2400);
+      }
+    }
     if (this.tool === 'blower') {
       tm.root.rotation.x = -0.55;
       if (on) tm.run.rotation.z += dt * 40;

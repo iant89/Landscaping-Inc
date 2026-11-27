@@ -16,6 +16,11 @@ export interface MowerModel {
   bladeLamp: THREE.Mesh;
   /** Puffs of exhaust smoke come from here. */
   pipeTip: THREE.Vector3;
+  /**
+   * The figure sitting in the seat. The player's own rider, so the game hides it whenever nobody is
+   * driving (otherwise a ghost sits on the mower you just walked away from).
+   */
+  driver: THREE.Object3D;
 }
 
 export interface MowerColors { body: string; shirt: string; cap: string }
@@ -141,16 +146,19 @@ export function buildMower(colors: MowerColors = PLAYER_COLORS): MowerModel {
   cap.position.set(0, 1.74, -0.4);
   const brim = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.03, 0.2), plastic(colors.cap, 0.8));
   brim.position.set(0, 1.76, -0.22);
+  const driver = new THREE.Group();
+  driver.add(torso, bib, head, cap, brim);
   for (const x of [-0.21, 0.21]) {
     const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.052, 0.34, 4, 8), plastic(colors.shirt, 0.9));
     arm.position.set(x, 1.42, -0.2);
     arm.rotation.x = -0.85;
     const hand = new THREE.Mesh(new THREE.SphereGeometry(0.055, 8, 6), skin);
     hand.position.set(x * 0.75, 1.44, 0.02);
-    body.add(arm, hand);
+    driver.add(arm, hand);
   }
+  body.add(driver);
 
-  body.add(chassis, tub, hood, grille, bumper, badge, seat, cushion, back, column, wheel, dash, bladeLamp, deck, deckRim, chuteM, chuteFlap, blade, engine, exhaust, torso, bib, head, cap, brim, ...deckBolt());
+  body.add(chassis, tub, hood, grille, bumper, badge, seat, cushion, back, column, wheel, dash, bladeLamp, deck, deckRim, chuteM, chuteFlap, blade, engine, exhaust, ...deckBolt());
   // gauge wheels at the front corners of the deck, like a real mower
   for (const x of [-0.78, 0.78]) {
     const gw = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.06, 10), RUBBER());
@@ -176,7 +184,7 @@ export function buildMower(colors: MowerColors = PLAYER_COLORS): MowerModel {
   blob.position.y = 0.012;
   root.add(blob);
   root.traverse((o) => { if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  return { root, body, wheels, blade, chute: new THREE.Vector3(1.15, 0.25, 0.15), exhaust, bladeLamp, pipeTip };
+  return { root, body, wheels, blade, chute: new THREE.Vector3(1.15, 0.25, 0.15), exhaust, bladeLamp, pipeTip, driver };
 }
 
 /** Spin wheels and blade and shake the body while the engine runs. */
