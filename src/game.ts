@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { DEFAULT_KEYMAP, Engine, FollowCamera, Input, Mover, Particles, Popups, Squash, TouchStick, clamp, lerpAngle, poseBody } from '../engine/src';
 import {
   BURN, CAN_FRACTION, CAN_POUR_TIME, CELL, CROSS_MID, DAY_END, DAY_START, FUEL_PRICE, GH, GW, HELPER_COST, HELPER_NAMES,
-  HELPER_WAGE, K_BED, K_LAWN, LOAD_TIME, MAX_STRIKES, MAX_X, MAX_Z, MIN_X, MIN_Z, PUMP, PUMP_R, RIG_RANGE, RIG_SPEED,
+  HELPER_WAGE, K_BED, K_LAWN, LOAD_TIME, MAX_STRIKES, MAX_X, MAX_Z, MIN_X, MIN_Z, PUMP, PUMP_R, RAMP_ANGLE, RAMP_MOUTH_R, RIG_RANGE, RIG_SPEED,
   SEC_PER_HOUR, STREETS, TOW_FEE, TOOL_BURN, UPGRADES, UpKey, WEEKDAYS, WEEKDAYS_LONG, YARD_ROAD_MAX, cellX, cellZ,
   fmtHour, streetAt, streetZ,
 } from './config';
@@ -104,18 +104,18 @@ const TUTORIAL_STEPS: { icon: string; title: string; body: string; keys: string;
   },
   {
     icon: '🧰', title: 'The trailer has the gear',
-    body: 'Walk to the trailer and press <b>T</b> to take a weed eater, hedge trimmer or leaf blower. They do one service each — handier than dragging the mower across the lawn.',
-    keys: 'T opens the trailer', done: 'tool',
+    body: 'Walk to the trailer and press <b>T</b> to take a weed eater, hedge trimmer or leaf blower. Stand near the work and <b>hold F</b> to run it — the bar at the bottom of the screen tells you when there is something in reach.',
+    keys: 'T takes a tool · hold F to use it', done: 'tool',
   },
   {
     icon: '🚚', title: 'Move the whole yard',
-    body: 'The mower rides on the trailer. To work the far end of a street, put it back and drive the truck — no more long slow trips to the pump.',
-    keys: 'Drive the rig to any clear grass', done: 'rig',
+    body: 'To move the whole yard, back the trailer up and <b>drive the mower up the ramps</b>. It straps itself down and you end up in the truck — drive off and it rides along behind you.',
+    keys: 'Drive up the ramps · L shuts it off and winches it', done: 'load',
   },
   {
     icon: '⛽', title: 'Never get stranded',
     body: 'There is a spare can of fuel on the truck. If you do run dry, press <b>G</b> to pour it in — and if the can is empty too, an arrow appears pointing you to the nearest pump.',
-    keys: 'G pours the can · C for the schedule', done: 'load',
+    keys: 'G pours the can · C for the schedule',
   },
 ];
 
@@ -166,6 +166,10 @@ export class Game {
   mowerLoaded = true;
   /** > 0 while the winch is dragging the mower on or off. */
   loading = 0;
+  /** True when the load in progress is you driving the mower up the ramps (not the winch). */
+  driveOn = false;
+  /** Seconds the mower has been sitting in the ramp mouth. */
+  private rampT = 0;
   /** The tool you have in your hands on foot, or null. */
   tool: ToolId | null = null;
   toolModel: ToolModel | null = null;
@@ -177,6 +181,8 @@ export class Game {
   /** 'load' or 'unload' while the winch runs. */
   loadKind: 'load' | 'unload' = 'load';
   private toolT = 0;
+  /** Timer for the little exhaust puff at the tool. */
+  private puffT2 = 0;
   /** Tutorial progress: which card is showing. */
   tutorialStep = 0;
   /** Set when you first start: shows the guided tour of the basics. */
@@ -219,6 +225,8 @@ export class Game {
   week: Record<string, 'done' | 'missed'> = {};
   earnedToday = 0;
   mownToday = 0;
+  /** Leaves blown away by hand today (shown as feedback so the blower feels like it's doing work). */
+  blownToday = 0;
   notes: string[] = [];
   yesterday: Weather = 'sunny';
 
@@ -296,7 +304,7 @@ export class Game {
     this.fuelArrow.renderOrder = 40;
     this.world.scene.add(this.fuelArrow);
     this.parkRigAt(RIG_HOME.x, RIG_HOME.z, RIG_HOME.yaw);
-    this.cam = new FollowCamera(this.engine.camera, { offset: new THREE.Vector3(0, 13.2, 7.0), boostFov: 6 }, this.engine.syncProjection);
+    this.cam = new FollowCamera(this.engine.camera, { offset: new THREE.Vector3(0, 4.6, 8.2), lookAhead: 2.5, boostFov: 6 }, this.engine.syncProjection);
     this.controls = new Input({ keymap: { ...DEFAULT_KEYMAP, KeyF: 'tool' }, capture: () => this.phase === 'play', onKey: this.onKey });
     new TouchStick(container, this.controls);
     this.setupOrbit();
@@ -421,7 +429,7 @@ export class Game {
       st.deadline = DAY_END;
       if (this.isDue(st)) booked++;
     });
-    this.earnedToday = 0; this.mownToday = 0; this.notes = [];
+    this.earnedToday = 0; this.mownToday = 0; this.blownToday = 0; this.notes = [];
     if (this.mowerLoaded) {
       // the mower is still strapped on from yesterday: the morning starts in the truck at the yard
       this.parkRigAt(this.rigHome.x, this.rigHome.z, this.rigHome.yaw);
@@ -616,11 +624,6 @@ export class Game {
 
   /** Middle-mouse drag orbits the camera around the player; drag up/down tilts a little. */
   private orbitDrag: { x: number; y: number } | null = null;
-  /** What we were driving last frame, and how long the camera has to settle into the new distance. */
-  private camMode: 'mower' | 'rig' | null | undefined = undefined;
-  private camEase = 0;
-  /** Seconds the player has been standing still, so the camera only settles behind them at rest. */
-  private idleT = 0;
 
   private setupOrbit() {
     const el = this.engine.renderer.domElement;
@@ -665,11 +668,9 @@ export class Game {
     if (code === 'KeyL') this.toggleLoad();
     if (code === 'KeyH' && !this.tutorialOn) this.beginTutorial();
     if (code === 'KeyR' && this.orbitDrag === null) {
-      // put the camera back behind whatever you're driving (or facing north on foot), instantly
-      this.cam.autoTarget = null;
+      // snap the view in behind whatever you're driving (or back to the default facing on foot)
       this.cam.snapAngle(this.mounted !== null ? this.active.yaw : 0);
-      this.cam.o.offset.y = this.mounted === 'rig' ? 16.5 : this.mounted === 'mower' ? 13.2 : 8.4;
-      this.cam.o.offset.z = this.mounted === 'rig' ? 9.0 : this.mounted === 'mower' ? 7.0 : 4.9;
+      this.cam.pull = this.camPull();
     }
     if (code === 'KeyT') this.openTrailer();
   };
@@ -687,10 +688,74 @@ export class Game {
   /** L: drop the ramps, or winch the mower back on. Works from either seat. */
   toggleLoad() {
     if (this.phase !== 'play' || this.loading > 0) return;
-    if (this.mounted === 'rig' && this.mowerLoaded) { this.openRig(); return; }
-    if (this.mowedOffNearby()) { this.loadMower(); this.tutorialFire('rig'); return; }
-    this.hud.toast(this.mowerLoaded ? 'The mower is already on the trailer.' : 'Bring the rig (or yourself) within 6 m of the mower.', 'info', 2400);
+    if (this.mowerLoaded) {
+      // already up there: get the ramps down (from the cab or from beside the trailer)
+      this.openRig();
+      return;
+    }
+    if (this.mounted === 'mower') {
+      this.hud.toast('🪜 Line the mower up with the back of the trailer and drive up the ramps — or press L to shut the engine off and load it by hand.', 'info', 3600);
+      return;
+    }
+    if (this.mounted === 'rig') {
+      // from the cab: hop out and drive the mower on, that's the whole point
+      this.hud.toast('Climb out (E), get on the mower and drive it up the ramps onto the trailer.', 'info', 3200);
+      return;
+    }
+    if (this.mowedOffNearby()) { this.startWinch(); this.tutorialFire('load'); return; }
+    this.hud.toast('Bring the rig (or yourself) within 6 m of the mower.', 'info', 2400);
   }
+
+  /** The trailer door: where the mower has to be, and which way it faces, to drive up the ramps. */
+  get rampMouth() {
+    const t = this.trailer;
+    // the ramps hang off the back of the trailer, so the mouth is behind it
+    return { x: t.x - Math.sin(t.yaw) * 2.6, z: t.z - Math.cos(t.yaw) * 2.6, yaw: t.yaw, lipX: t.x, lipZ: t.z };
+  }
+
+  /** Is the mower at the foot of the ramps, pointing up them? */
+  private atRamps() {
+    const mouth = this.rampMouth;
+    const d = Math.hypot(this.mover.x - mouth.x, this.mover.z - mouth.z);
+    if (d > RAMP_MOUTH_R) return false;
+    // heading up the ramps means pointing the way the trailer points
+    let a = this.mover.yaw - mouth.yaw;
+    while (a > Math.PI) a -= Math.PI * 2;
+    while (a < -Math.PI) a += Math.PI * 2;
+    return Math.abs(a) < RAMP_ANGLE;
+  }
+
+  /** Driving the mower into the ramp mouth loads it: you end up in the truck. Called every frame. */
+  private checkDriveOn(dt: number) {
+    if (this.mounted !== 'mower' || this.mowerLoaded || this.loading > 0) return;
+    if (this.atRamps()) {
+      this.rampT = (this.rampT ?? 0) + dt;
+      if (this.rampT > 0.25) {
+        this.rampT = 0;
+        this.startDriveOn();
+      }
+    } else this.rampT = 0;
+  }
+
+  /** The mower rolls up the ramps, is strapped down, and you find yourself in the truck. */
+  private startDriveOn() {
+    this.loading = LOAD_TIME;
+    this.loadKind = 'load';
+    this.driveOn = true;
+    this.sfx.mount();
+    this.hud.toast('🚜 Up the ramps…', 'info', 1400);
+  }
+
+  /** L while on the mower: shut it off and winch it up instead of driving it on. */
+  private startWinch() {
+    if (this.loading > 0) return;
+    this.loading = LOAD_TIME;
+    this.loadKind = 'load';
+    this.driveOn = false;
+    this.sfx.mount();
+    this.hud.toast('🪝 Winching the mower on…', 'info', 1400);
+  }
+
 
   /** Is the mower close enough to winch on? */
   private mowedOffNearby() {
@@ -909,12 +974,18 @@ export class Game {
       this.model.body.rotation.set(0, 0, 0);
       if (this.blades) this.model.blade.rotation.y += dt * 6;
     } else if (this.loading > 0 && this.loadKind === 'load') {
-      // sliding up the ramps onto the deck
+      // rolling up the ramps onto the deck: it drives itself up (nose first), then settles onto the
+      // tray. `driveOn` is the mower driving on; otherwise a winch drags it.
       const k = 1 - this.loading / LOAD_TIME;
-      const from = this.mowerPark, to = { x: this.trailer.x, z: this.trailer.z };
+      const from = this.driveOn ? { x: this.mover.x, z: this.mover.z } : this.mowerPark;
+      const to = { x: this.trailer.x, z: this.trailer.z };
       this.model.root.visible = true;
-      this.model.root.position.set(from.x + (to.x - from.x) * k, 0.6 * Math.max(0, k - 0.55) / 0.45, from.z + (to.z - from.z) * k);
-      this.model.root.rotation.y = this.mowerPark.yaw + (this.trailer.yaw + Math.PI / 2 - this.mowerPark.yaw) * k;
+      this.model.driver.visible = this.driveOn;
+      // ease up the ramp: flat on the ground, then up onto the 0.6 m deck for the last third
+      const lift = Math.min(1, Math.max(0, (k - 0.55) / 0.45));
+      this.model.root.position.set(from.x + (to.x - from.x) * k, 0.6 * lift, from.z + (to.z - from.z) * k);
+      // nose stays pointing up the ramps (the trailer's own heading) rather than the strapped pose
+      this.model.root.rotation.set(-0.28 * (1 - lift), this.trailer.yaw, 0);
       this.model.body.position.y = 0;
     } else if (this.mounted === 'mower') {
       this.model.root.visible = true;
@@ -1002,7 +1073,11 @@ export class Game {
     const raw = this.controls.read();
     if (raw.m < 0.02) return { ...raw, x: 0, z: 0 };
     const c = Math.cos(this.cam.angle), s = Math.sin(this.cam.angle);
-    return { ...raw, x: raw.x * c + raw.z * s, z: -raw.x * s + raw.z * c };
+    // The camera looks along (sin, cos) of its angle, so "up" must push that way and screen-right
+    // is (-cos, sin) in world space (three.js cameras have +X pointing screen-left when looking +Z).
+    // Getting these signs wrong is the difference between driving away from the camera and driving
+    // into it, so they're spelled out rather than folded into one rotate-by-angle expression.
+    return { ...raw, x: -raw.x * c - raw.z * s, z: raw.x * s - raw.z * c };
   }
 
   private play(dt: number, t: number) {
@@ -1033,6 +1108,9 @@ export class Game {
     const maxSp = this.mounted === 'rig' ? RIG_SPEED : this.mounted === 'mower' ? this.speedMax : this.feet.o.maxSpeed;
     const frac = Math.min(1, m.speed / maxSp);
 
+    // driving the mower into the ramp mouth is how you load it
+    this.checkDriveOn(dt);
+
     let cutNow = 0;
     if (this.mounted === 'mower') {
       cutNow = this.blades && !dry ? this.cutAround(dt) : this.idleDeck(dt);
@@ -1047,9 +1125,13 @@ export class Game {
       this.walkAbout(dt);
       this.toolTankTopUp(dt);
       this.trailerPrompt();
-      // a hand tool only runs while you hold it up to the work
+      // A hand tool runs while F is held. The walker also turns to face the nearest thing the tool
+      // can work on, so you never have to line it up by eye — this is also what makes the tools
+      // usable at all, previously you had to be facing the exact spot.
+      this.aimTool(dt);
       if (this.controls.has('tool')) this.useTool(dt); else this.toolActive = false;
     }
+    this.updatePrompt();
     this.loadUpdate(dt);
     this.updateNpcs(dt, t);
     this.updateFuel(dt, frac, cutNow);
@@ -1067,32 +1149,17 @@ export class Game {
     else if (this.mounted === 'rig') this.sfx.drone(0.3 + frac * 0.35, frac * 1.1);
     else this.sfx.drone(0, 0);
 
-    // The view is camera-relative driving's reference, so it must never turn while you drive: a view
-    // that chases your heading makes "up" mean something new every frame, and a held turn spirals
-    // (that was the "controls go crazy" bug). So it holds perfectly still while you're moving, and
-    // while you're stopped it slowly settles in behind you — where you can see it happen and where
-    // nothing can feed back into your steering.
-    const atRest = m.speed < 0.6 && inp.m < 0.05 && this.mounted !== null;
-    if (atRest && this.orbitDrag === null && this.phase === 'play') {
-      this.idleT += dt;
-      if (this.idleT > 1.2) this.cam.autoTarget = m.yaw;
-    } else {
-      this.idleT = 0;
-      this.cam.autoTarget = null;
-    }
+    // Third-person camera. The player owns the view angle: it only turns when they drag it or press
+    // R. Auto-following the heading is deliberately NOT done — with camera-relative keys a view that
+    // chases you rotates the controls underneath you and a held turn spirals (the "controls go
+    // crazy" bug). You always see out of the back of the camera, so it reads as third person.
     this.cam.update(dt, m.x, m.z, m.vx, m.vz, this.boost);
-    // a bigger vehicle wants a wider view: ease into the new distance when you change what you're
-    // driving, then leave the camera alone so a hand-tilted view stays where you put it
-    if (this.camMode !== this.mounted) { this.camMode = this.mounted; this.camEase = 1.4; }
-    if (this.camEase > 0 && this.orbitDrag === null) {
-      this.camEase = Math.max(0, this.camEase - dt);
-      const wantY = this.mounted === 'rig' ? 16.5 : this.mounted === 'mower' ? 13.2 : 8.4;
-      const wantZ = this.mounted === 'rig' ? 9.0 : this.mounted === 'mower' ? 7.0 : 4.9;
-      const o = this.cam.o.offset;
-      o.y += (wantY - o.y) * Math.min(1, dt * 3.5);
-      o.z += (wantZ - o.z) * Math.min(1, dt * 3.5);
-    }
+    // a bigger vehicle wants a wider view; this only changes distance and height, never the angle
+    this.cam.setPull(this.camPull(), this.orbitDrag === null ? dt : 0);
   }
+
+  /** How far back and up the camera sits for what you're driving. */
+  private camPull() { return this.mounted === 'rig' ? 1.9 : this.mounted === 'mower' ? 1.4 : 0.95; }
 
   // ---------------------------------------------------------------- on foot
   /** Rough walking: brush the hedges and kick up any leaves you scuff through. */
@@ -1225,7 +1292,6 @@ export class Game {
       // drop the trailer behind wherever the truck was left
       this.startRig();
       this.cam.snap(this.rigMover.x, this.rigMover.z, this.rigMover.yaw);
-      this.tutorialFire('rig');
     } else {
       this.mounted = 'mower';
       this.mover.place(this.mowerPark.x, this.mowerPark.z, this.mowerPark.yaw);
@@ -1294,9 +1360,17 @@ export class Game {
     if (this.loading > 0) return;
     if (this.loadKind === 'load') {
       this.mowerLoaded = true;
+      // you're in the truck: the engine is off on the mower and you're strapped into the cab
+      this.blades = false;
       this.mounted = 'rig';
+      // park the trailer where it stands, the mower rides on it
+      this.trailer = { ...this.trailer };
+      this.rigMover.place(this.rigMover.x, this.rigMover.z, this.rigMover.yaw);
+      this.feet.place(this.rigMover.x, this.rigMover.z, this.rigMover.yaw);
+      this.driveOn = false;
       this.sfx.cash();
-      this.hud.toast('🚜 Mower loaded. Drive the rig to the next yard.', 'good', 3000);
+      this.cam.snap(this.rigMover.x, this.rigMover.z, this.rigMover.yaw);
+      this.hud.toast('✅ Mower strapped down. You are in the truck — drive to the next yard.', 'good', 3600);
       this.tutorialFire('load');
     } else {
       this.mowerLoaded = false;
@@ -1316,7 +1390,13 @@ export class Game {
   /** The trailer menu: swap the hand tool, or drop the mower off / winch it back on. */
   openTrailer() {
     if (this.phase !== 'play') return;
-    if (this.mounted !== null) { this.hud.toast('Hop out (E) to get at the equipment on the trailer.', 'info', 2000); return; }
+    if (this.mounted !== null) {
+      // in a seat you can't reach the tools, but the ramps are right there
+      this.hud.toast(this.mowerLoaded
+        ? 'Hop out (E) to reach the tools — or press L to drop the ramps and roll the mower off.'
+        : 'Hop out (E) to get at the equipment on the trailer.', 'info', 2600);
+      return;
+    }
     const near = Math.min(
       Math.hypot(this.feet.x - this.trailer.x, this.feet.z - this.trailer.z),
       Math.hypot(this.feet.x - this.rigMover.x, this.feet.z - this.rigMover.z),
@@ -1333,8 +1413,8 @@ export class Game {
       sub: 'walk and knock hands-free', key: '0', onPick: () => this.pickTool(null),
     });
     opts.push({
-      label: this.mowerLoaded ? '🚜 Roll the mower off' : '🪝 Winch the mower on',
-      sub: this.mowerLoaded ? 'drive it off the ramps' : `needs you within ${RIG_RANGE} m`, key: 'L', onPick: () => {
+      label: this.mowerLoaded ? '🚜 Roll the mower off' : '🪝 Winch the mower on (or drive it up)',
+      sub: this.mowerLoaded ? 'drop the ramps and drive it off' : 'drive it up the ramps yourself · L is the quick winch', key: 'L', onPick: () => {
         this.hud.close(); this.phase = 'play';
         if (this.mowerLoaded) this.openRig(); else this.loadMower();
       },
@@ -1388,6 +1468,85 @@ export class Game {
 
   get toolFuelMax() { return 60; }
 
+  /**
+   * The one line of guidance the player always has: what they can do right here, right now. This is
+   * what makes the hand tools discoverable — standing with a blower and nothing to blow says so.
+   */
+  private updatePrompt() {
+    // the tutorial card sits in the corner, so the prompt still has room to help
+    if (this.hud.overlayOpen) { this.hud.prompt(null); return; }
+    const f = this.feet;
+    if (this.mounted === 'mower') {
+      const mouth = this.rampMouth;
+      const d = Math.hypot(this.mover.x - mouth.x, this.mover.z - mouth.z);
+      this.hud.prompt(
+        this.atRamps() ? '🚜 <kbd>W</kbd> keep going — you\'re lined up with the ramps'
+        : d < 9 ? '🪜 Back the trailer up here, then drive the mower up the ramps to load it'
+        : null,
+        this.atRamps() ? 'ok' : 'info',
+      );
+      return;
+    }
+    if (this.mounted === 'rig') { this.hud.prompt('🚚 <kbd>E</kbd> hop out · <kbd>L</kbd> ramps down', 'info'); return; }
+    // on foot
+    const nearTrailer = Math.hypot(f.x - this.trailer.x, f.z - this.trailer.z) < 4.5 ||
+      Math.hypot(f.x - this.rigMover.x, f.z - this.rigMover.z) < 4.5;
+    if (!this.tool) {
+      this.hud.prompt(nearTrailer ? '🧰 <kbd>T</kbd> take a tool from the trailer' : null, nearTrailer ? 'ok' : 'info');
+      return;
+    }
+    const have = this.toolTarget(this.tool, f.x, f.z);
+    const low = this.toolFuel <= 1;
+    if (low) this.hud.prompt('🛢️ This tool is out of fuel — top it up at the trailer', 'warn');
+    else if (!have) this.hud.prompt(`${toolDef(this.tool).icon} ${toolDef(this.tool).name} · nothing in reach here`, 'warn');
+    else this.hud.prompt(`${toolDef(this.tool).icon} Hold <kbd>F</kbd> to run the ${toolDef(this.tool).name.toLowerCase()}`, 'ok');
+  }
+
+  /**
+   * Turn the walker toward the nearest valid target for the tool in hand (without taking over from
+   * the stick: it only turns while you're not steering), and say so when there's nothing in reach.
+   */
+  private aimTool(dt: number) {
+    const t = this.tool;
+    if (!t) return;
+    if (this.controls.read().m > 0.1) return;
+    const f = this.feet;
+    const want = this.toolTarget(t, f.x, f.z);
+    if (want) f.yaw = lerpAngle(f.yaw, Math.atan2(want.x - f.x, want.z - f.z), Math.min(1, dt * 6));
+  }
+
+  /** The nearest thing a tool can work on, or null. Reach is a bit generous so it isn't fiddly. */
+  private toolTarget(t: ToolId, x: number, z: number) {
+    const R = toolDef(t).reach + 1.6;
+    let best: { x: number; z: number } | null = null, bd = Infinity;
+    if (t === 'trimmer') {
+      for (const h of this.world.hedges) {
+        if (!h.shaggy) continue;
+        const b = h.box;
+        const cx = clamp(x, b.minX, b.maxX), cz = clamp(z, b.minZ, b.maxZ);
+        const d = Math.hypot(x - cx, z - cz);
+        if (d < R && d < bd) { bd = d; best = { x: cx, z: cz }; }
+      }
+    } else if (t === 'blower') {
+      for (const l of this.leaves.list) {
+        if (!l.alive) continue;
+        const d = Math.hypot(l.x - x, l.z - z);
+        if (d < R && d < bd) { bd = d; best = { x: l.x, z: l.z }; }
+      }
+    } else {
+      // weed eater: the nearest uncut edge cell
+      const g0x = Math.floor((x - R - MIN_X) / CELL), g1x = Math.floor((x + R - MIN_X) / CELL);
+      const g0z = Math.floor((z - R - MIN_Z) / CELL), g1z = Math.floor((z + R - MIN_Z) / CELL);
+      for (let gz = Math.max(0, g0z); gz <= Math.min(GH - 1, g1z); gz++) for (let gx = Math.max(0, g0x); gx <= Math.min(GW - 1, g1x); gx++) {
+        const c = gz * GW + gx;
+        if (this.world.owner[c] < 0 || !this.world.edge[c] || this.grass.isCut(c)) continue;
+        const d = Math.hypot(cellX(c) - x, cellZ(c) - z);
+        if (d < R && d < bd) { bd = d; best = { x: cellX(c), z: cellZ(c) }; }
+      }
+    }
+    return best;
+  }
+
   /** Hold a tool toward what you're working on; it does its one job in reach. */
   private useTool(dt: number) {
     const t = this.tool;
@@ -1398,10 +1557,26 @@ export class Game {
     this.toolFuel = Math.max(0, this.toolFuel - TOOL_BURN * dt);
     this.toolActive = true;
     if (def.action === 'leaves') {
-      const n = this.leaves.gust(f.x + Math.sin(f.yaw) * 1.2, f.z + Math.cos(f.yaw) * 1.2, def.reach, 2.2, 3.2);
-      if (n > 0 && Math.random() < 0.25) this.sfx.leaf();
-      this.leafT -= dt;
-      if (this.leafT <= 0) { this.leafT = 2.6; this.sfx.leaf(); }
+      // A blower moves leaves out of reach for good: sweep anything under the nozzle off the world,
+      // so clearing a driveway actually finishes that part of the job instead of just stirring it.
+      const fx = Math.sin(f.yaw), fz = Math.cos(f.yaw);
+      const nx = f.x + fx * def.reach * 0.8;
+      const nz = f.z + fz * def.reach * 0.8;
+      let gone = 0;
+      for (const l of this.leaves.list) {
+        if (!l.alive) continue;
+        // in front of you, in a fat cone — walking the length of a drive clears all of it
+        const dx = l.x - f.x, dz = l.z - f.z;
+        const along = dx * fx + dz * fz;
+        if (along < -0.8 || along > def.reach * 1.5) continue;
+        if (Math.abs(dx * fz - dz * fx) > def.reach * 0.9) continue;
+        l.alive = false;
+        gone++;
+        if (gone <= 3) this.clips.spawn(l.x, 0.2, l.z, Math.sin(f.yaw) * 7, 2.2, Math.cos(f.yaw) * 7, 0.85, 0.45, 0.15, 0.12, 0.5, 0, 30);
+      }
+      const n = this.leaves.gust(nx, nz, def.reach * 1.3, 1.6, 2.6);
+      if (gone > 0) this.blownToday += gone;
+      if ((gone > 0 || n > 0) && Math.random() < 0.4) this.sfx.leaf();
       return;
     }
     if (def.action === 'hedge') {
@@ -1451,6 +1626,17 @@ export class Game {
     const arm = this.walker.armR;
     arm.rotation.x = -0.9 + (on ? 0 : 0.25);
     arm.rotation.z = -0.32;
+    // a visible puff of exhaust at the tool itself, so "it's running" is obvious from the camera
+    if (on) {
+      this.puffT2 -= dt;
+      if (this.puffT2 <= 0) {
+        this.puffT2 = 0.07;
+        const f = this.feet;
+        const bx = f.x - Math.sin(f.yaw) * 0.3, bz = f.z - Math.cos(f.yaw) * 0.3;
+        this.smoke.spawn(bx, 1.15, bz, (Math.random() - 0.5) * 0.5, 0.7 + Math.random() * 0.3, (Math.random() - 0.5) * 0.5,
+          0.62, 0.62, 0.66, 0.28, 0.4, 0);
+      }
+    }
     // an empty tank sputters instead of spinning: tell the player why nothing is happening
     if (this.toolActive && !on && this.toolFuel <= 0) {
       this.toolT -= dt;

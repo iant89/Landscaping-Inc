@@ -67,6 +67,9 @@ export const RIG_SPEED = 4.6;
 export const RIG_RANGE = 6.5;
 /** Seconds for the winch to drag the mower on (or roll it off). */
 export const LOAD_TIME = 1.4;
+/** How close the mower has to be to the foot of the ramps, and how straight, to drive on. */
+export const RAMP_MOUTH_R = 2.1;
+export const RAMP_ANGLE = 0.7;
 /** You can only drop the rig on open ground this far from a road's centre line. */
 export const YARD_ROAD_MAX = 26;
 /** The hand-held tools run off their own little tank (units per second while working). */
