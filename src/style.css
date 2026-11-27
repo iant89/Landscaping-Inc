@@ -43,7 +43,8 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd3f0; col
 .hint b { background: #f2a91e; color: #fff; border-radius: 50%; padding: 0 7px; }
 
 .tr { position: absolute; top: 12px; right: 12px; display: flex; gap: 8px; align-items: flex-start; }
-.minimap { width: 220px; height: auto; padding: 0; image-rendering: auto; border: 3px solid rgba(255, 253, 245, 0.92); }
+.btn-col { display: flex; flex-direction: column; gap: 8px; }
+.minimap { width: 150px; height: auto; padding: 0; image-rendering: auto; border: 3px solid rgba(255, 253, 245, 0.92); }
 .round-btn { pointer-events: auto; width: 40px; height: 40px; border-radius: 50%; border: 0; background: rgba(255, 253, 245, 0.92); box-shadow: var(--shadow); font-weight: 900; cursor: pointer; }
 
 .toasts { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; width: min(560px, 60vw); }
@@ -96,10 +97,46 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd3f0; col
 .boost-btn { position: absolute; right: 18px; bottom: max(22px, env(safe-area-inset-bottom)); width: 76px; height: 76px; border-radius: 50%; border: 3px solid #fff; background: rgba(224, 83, 63, 0.55); font-size: 32px; pointer-events: auto; touch-action: none; }
 .boost-btn.on { background: rgba(224, 83, 63, 0.9); transform: scale(0.92); }
 
+/* jobs: service chips */
+.bars > span { font-size: 12px; white-space: nowrap; }
+.bars > span.ok { color: var(--green-dark); }
+.job em { font-style: normal; background: var(--green); color: #fff; border-radius: 6px; padding: 0 5px; font-size: 10px; text-transform: uppercase; }
+.more { font-size: 12px; font-weight: 700; opacity: 0.6; margin-top: 4px; }
+.wx { font-size: 15px; }
+
+/* offer card */
+.offer { margin-top: 10px; background: #f1eedf; border-radius: 12px; padding: 8px 12px; line-height: 1.6; font-size: 14px; }
+.offer small { opacity: 0.6; font-weight: 700; }
+
+/* weekly schedule */
+.card.wide { width: min(860px, 100%); }
+.section { font-weight: 900; display: flex; justify-content: space-between; margin: 12px 0 6px; }
+.week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.day { background: #f1eedf; border-radius: 10px; padding: 6px; min-height: 84px; display: flex; flex-direction: column; gap: 4px; }
+.day.today { outline: 3px solid var(--gold); background: #fff6d6; }
+.day.past { opacity: 0.6; }
+.day-head { font-weight: 900; font-size: 13px; display: flex; justify-content: space-between; align-items: baseline; }
+.day-head span { font-size: 10px; font-weight: 700; opacity: 0.6; }
+.chip { font-size: 11px; font-weight: 800; border-radius: 6px; padding: 2px 5px; background: #dfe9f5; color: #24476e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chip.done { background: #d4f1df; color: var(--green-dark); }
+.chip.missed { background: #fadad5; color: #a1281a; }
+.chip.due { background: #2b7de0; color: #fff; }
+.chip .crew { font-weight: 700; opacity: 0.85; }
+.empty { font-size: 11px; opacity: 0.4; font-weight: 700; }
+.legend { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.forecast { display: flex; gap: 6px; margin-top: 10px; }
+.forecast > div { flex: 1; background: #eaf3fb; border-radius: 10px; padding: 6px; text-align: center; display: flex; flex-direction: column; }
+.forecast b { font-size: 22px; }
+.forecast span { font-weight: 900; font-size: 12px; }
+.forecast small { font-size: 11px; opacity: 0.7; font-weight: 700; }
+.unlock { background: #fff6d6; border: 2px dashed var(--gold); border-radius: 12px; padding: 8px 12px; font-size: 13px; margin: 6px 0; }
+.how b.cal { background: none; padding: 0; }
+
 @media (max-width: 640px) {
+  .week { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .minimap { width: 96px; }
   .tl { min-width: 0; padding: 8px 10px; }
   .money { font-size: 22px; }
-  .minimap { width: 130px; }
   .jobs { bottom: 108px; width: calc(100vw - 24px); }
   .toasts { top: 150px; width: 92vw; }
   .toast { font-size: 13px; }

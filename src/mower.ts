@@ -11,10 +11,15 @@ export interface MowerModel {
   chute: THREE.Vector3;
 }
 
-/** A chunky red riding mower with a driver. Faces +Z. */
-export function buildMower(): MowerModel {
+export interface MowerColors { body: string; shirt: string; cap: string }
+export const PLAYER_COLORS: MowerColors = { body: '#d23a2c', shirt: '#2f5d9e', cap: '#ffd23a' };
+export const CREW_COLORS: MowerColors = { body: '#2f9e57', shirt: '#f2efe8', cap: '#1f6f43' };
+export const RIVAL_COLORS: MowerColors = { body: '#2b6fd6', shirt: '#14365f', cap: '#9be15d' };
+
+/** A chunky riding mower with a driver. Faces +Z. */
+export function buildMower(colors: MowerColors = PLAYER_COLORS): MowerModel {
   const lam = (c: string) => new THREE.MeshLambertMaterial({ color: c });
-  const red = lam('#d23a2c'), dark = lam('#2b2b2e'), metal = lam('#9aa0a6');
+  const red = lam(colors.body), dark = lam('#2b2b2e'), metal = lam('#9aa0a6');
   const root = new THREE.Group();
   const body = new THREE.Group();
   root.add(body);
@@ -46,13 +51,13 @@ export function buildMower(): MowerModel {
   blade.position.set(0, 0.12, 0.15);
 
   // driver: overalls, head, cap
-  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.55, 10), lam('#2f5d9e'));
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.55, 10), lam(colors.shirt));
   torso.position.set(0, 1.3, -0.42);
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 10), lam('#e8b98f'));
   head.position.set(0, 1.72, -0.4);
-  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.09, 12), lam('#ffd23a'));
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.09, 12), lam(colors.cap));
   cap.position.set(0, 1.84, -0.4);
-  const brim = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.03, 0.2), lam('#ffd23a'));
+  const brim = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.03, 0.2), lam(colors.cap));
   brim.position.set(0, 1.81, -0.22);
 
   body.add(chassis, hood, grille, seat, back, column, wheel, deck, chuteM, blade, torso, head, cap, brim);
@@ -67,4 +72,12 @@ export function buildMower(): MowerModel {
   }
   root.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
   return { root, body, wheels, blade, chute: new THREE.Vector3(1.15, 0.25, 0.15) };
+}
+
+/** Spin wheels and blade and shake the body while the engine runs. */
+export function animateMower(md: MowerModel, yaw: number, vx: number, vz: number, dt: number, t: number, running: boolean) {
+  const fwd = vx * Math.sin(yaw) + vz * Math.cos(yaw);
+  md.wheels.forEach((w, i) => { w.rotation.x += (fwd * dt) / (i < 2 ? 0.26 : 0.38); });
+  md.blade.rotation.y += dt * (running ? 45 : 2);
+  md.body.position.y = running ? Math.sin(t * 70) * 0.012 : 0;
 }

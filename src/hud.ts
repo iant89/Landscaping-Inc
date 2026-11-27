@@ -1,11 +1,25 @@
-import { UPGRADES, UpKey, fmtHour } from './config';
+import { UPGRADES, UpKey, WEEKDAYS, fmtHour } from './config';
 
-export interface JobLine { label: string; lawn: number; leaves: number; due: string; here: boolean; client: boolean }
-export interface HudData {
-  money: number; day: number; hour: number; rep: number; regulars: number;
-  fuel: number; fuelMax: number; refueling: boolean;
-  jobs: JobLine[];
+export interface JobLine {
+  label: string;
+  lawn: number;
+  /** Remaining work per extra service, or null if not booked. */
+  leaves: number | null;
+  edge: number | null;
+  hedges: number | null;
+  due: string;
+  here: boolean;
+  trial: boolean;
+  crew: string | null;
 }
+export interface HudData {
+  money: number; dayLabel: string; hour: number; rep: number; weather: string;
+  fuel: number; fuelMax: number; refueling: boolean;
+  jobs: JobLine[]; regulars: number;
+}
+export type CellState = 'done' | 'missed' | 'due' | 'later';
+export interface ScheduleCell { label: string; state: CellState; crew?: string }
+export interface ScheduleData { week: number; today: number; days: ScheduleCell[][]; forecast: { day: string; icon: string; name: string; note: string }[] }
 export interface DialogOption { label: string; sub?: string; key: string; primary?: boolean; onPick: () => void }
 export type ToastKind = 'info' | 'good' | 'bad' | 'big';
 
@@ -23,6 +37,24 @@ export const stars = (r: number) => {
   return s;
 };
 
+const STATE_ICON: Record<CellState, string> = { done: '✓', missed: '✕', due: '●', later: '' };
+
+function scheduleGrid(d: ScheduleData) {
+  const cols = WEEKDAYS.map((name, i) => {
+    const cells = d.days[i].map((c) => `<div class="chip ${c.state}">${STATE_ICON[c.state]} ${c.label}${c.crew ? ` <span class="crew">👷${c.crew}</span>` : ''}</div>`).join('');
+    const load = d.days[i].length;
+    return `<div class="day${i === d.today ? ' today' : ''}${i < d.today ? ' past' : ''}">
+      <div class="day-head">${name}<span>${load ? `${load} lawn${load > 1 ? 's' : ''}` : ''}</span></div>
+      ${cells || '<div class="empty">free</div>'}
+    </div>`;
+  }).join('');
+  return `<div class="week">${cols}</div>`;
+}
+
+function forecastRow(f: ScheduleData['forecast']) {
+  return `<div class="forecast">${f.map((x) => `<div><b>${x.icon}</b><span>${x.day}</span><small>${x.name}</small></div>`).join('')}</div>`;
+}
+
 /** All the DOM on top of the 3D view. */
 export class Hud {
   readonly root: HTMLDivElement;
@@ -34,9 +66,8 @@ export class Hud {
   private toasts: HTMLDivElement;
   private overlay: HTMLDivElement;
   private dialogKeys: DialogOption[] = [];
-  boostBtn: HTMLButtonElement | null = null;
 
-  constructor(parent: HTMLElement, isTouch: boolean, onBoost: (b: boolean) => void, onPause: () => void) {
+  constructor(parent: HTMLElement, isTouch: boolean, onBoost: (b: boolean) => void, onPause: () => void, onSchedule: () => void) {
     this.root = h('div', 'hud');
     parent.appendChild(this.root);
     const tl = h('div', 'panel tl');
@@ -44,15 +75,22 @@ export class Hud {
     const fuel = h('div', 'fuel');
     this.fuelBar = h('div', 'fuel-fill');
     this.fuelText = h('div', 'fuel-text');
-    fuel.append(h('span', 'fuel-icon', '⛽'), h('div', 'fuel-track'), this.fuelText);
-    fuel.querySelector('.fuel-track')!.appendChild(this.fuelBar);
+    const track = h('div', 'fuel-track');
+    track.appendChild(this.fuelBar);
+    fuel.append(h('span', 'fuel-icon', '⛽'), track, this.fuelText);
     tl.append(this.stats, fuel);
     this.jobs = h('div', 'panel jobs');
     const tr = h('div', 'tr');
     this.minimap = h('canvas', 'panel minimap');
+    const btns = h('div', 'btn-col');
     const pause = h('button', 'round-btn', '❚❚');
+    pause.title = 'Pause (Esc)';
     pause.onclick = onPause;
-    tr.append(pause, this.minimap);
+    const cal = h('button', 'round-btn', '📅');
+    cal.title = 'Schedule (C)';
+    cal.onclick = onSchedule;
+    btns.append(pause, cal);
+    tr.append(btns, this.minimap);
     this.toasts = h('div', 'toasts');
     this.overlay = h('div', 'overlay hidden');
     this.root.append(tl, this.jobs, tr, this.toasts, this.overlay);
@@ -64,7 +102,6 @@ export class Hud {
       b.addEventListener('pointercancel', on(false));
       b.addEventListener('pointerleave', on(false));
       this.root.appendChild(b);
-      this.boostBtn = b;
     }
   }
 
@@ -73,7 +110,7 @@ export class Hud {
   update(d: HudData) {
     this.stats.innerHTML =
       `<div class="money">$${Math.floor(d.money).toLocaleString()}</div>` +
-      `<div class="clock">Day ${d.day} · ${fmtHour(d.hour)}</div>` +
+      `<div class="clock">${d.dayLabel} · ${fmtHour(d.hour)} <span class="wx">${d.weather}</span></div>` +
       `<div class="rep" title="Reputation">${stars(d.rep)} <span>${d.rep.toFixed(1)}</span></div>`;
     const f = d.fuel / d.fuelMax;
     this.fuelBar.style.width = `${(f * 100).toFixed(1)}%`;
@@ -81,18 +118,23 @@ export class Hud {
     this.fuelText.textContent = d.refueling ? 'Filling…' : `${Math.ceil(f * 100)}%`;
     if (!d.jobs.length) {
       this.jobs.innerHTML = d.regulars
-        ? '<div class="hint">✅ All caught up! Knock on more doors marked <b>!</b> to grow the business.</div>'
-        : '<div class="hint">No jobs yet: drive up to a front door marked <b>!</b> to knock.</div>';
+        ? '<div class="hint">✅ Nothing left on today\'s schedule. Knock on doors marked <b>!</b> to grow the business.</div>'
+        : '<div class="hint">No customers yet: drive up to a front door marked <b>!</b> to knock.</div>';
       return;
     }
-    this.jobs.innerHTML = '<div class="jobs-title">Today\'s jobs</div>' + d.jobs.map((j) => `
-      <div class="job${j.here ? ' here' : ''}">
-        <div class="job-head"><span>${j.client ? '🔁 ' : ''}${j.label}</span><span class="due">due ${j.due}</span></div>
-        <div class="bars">
-          <div class="bar"><div style="width:${Math.min(100, j.lawn * 100).toFixed(0)}%"></div></div>
-          <span>🌱 ${Math.floor(j.lawn * 100)}%</span><span>🍂 ${j.leaves}</span>
-        </div>
-      </div>`).join('');
+    const shown = d.jobs.slice(0, 5);
+    this.jobs.innerHTML = '<div class="jobs-title">Today\'s schedule</div>' + shown.map((j) => {
+      const chips = [
+        `<span>🌱 ${Math.floor(j.lawn * 100)}%</span>`,
+        j.leaves !== null ? `<span class="${j.leaves <= 1 ? 'ok' : ''}">🍂 ${j.leaves <= 1 ? '✓' : j.leaves}</span>` : '',
+        j.edge !== null ? `<span class="${j.edge >= 0.9 ? 'ok' : ''}">📏 ${j.edge >= 0.9 ? '✓' : `${Math.floor(j.edge * 100)}%`}</span>` : '',
+        j.hedges !== null ? `<span class="${j.hedges === 0 ? 'ok' : ''}">✂️ ${j.hedges === 0 ? '✓' : j.hedges}</span>` : '',
+      ].join('');
+      return `<div class="job${j.here ? ' here' : ''}">
+        <div class="job-head"><span>${j.trial ? '<em>trial</em> ' : ''}${j.label}</span><span class="due">${j.crew ? `👷 ${j.crew}` : `due ${j.due}`}</span></div>
+        <div class="bars"><div class="bar"><div style="width:${Math.min(100, j.lawn * 100).toFixed(0)}%"></div></div>${chips}</div>
+      </div>`;
+    }).join('') + (d.jobs.length > shown.length ? `<div class="more">+${d.jobs.length - shown.length} more (C for schedule)</div>` : '');
   }
 
   toast(text: string, kind: ToastKind = 'info', ms = 2600) {
@@ -141,14 +183,15 @@ export class Hud {
   title(hasSave: boolean, onNew: () => void, onContinue: () => void) {
     const card = h('div', 'card title-card', `
       <div class="logo">🌱 LANDSCAPING INC.</div>
-      <div class="tag">One mower. One street. Build the best lawn business on ${'Maple Street'}.</div>
+      <div class="tag">One mower, three streets. Build the best lawn business in town.</div>
       <ul class="how">
         <li>Drive to a front door marked <b>!</b> to knock and pitch your services</li>
-        <li>Mow the lawn and vacuum the leaves off the sidewalk, path and driveway before it's due</li>
-        <li>Happy customers become regulars and pay every day</li>
-        <li>Refuel at your truck. Don't squash the flowers!</li>
+        <li>Each customer books 1–3 cuts a week on set days. <b class="cal">📅</b> Stick to the schedule: missed visits are strikes</li>
+        <li>Some also want leaves cleared 🍂, edges trimmed 📏 or hedges cut ✂️</li>
+        <li>Rain makes grass shoot up; wind brings leaves. Watch out for Green Giant Lawns.</li>
+        <li>Hire crew to mow your regulars, and win more streets as your reputation grows</li>
       </ul>
-      <div class="controls">WASD / arrows to drive · Shift to go full throttle · Esc to pause · M to mute</div>`);
+      <div class="controls">WASD / arrows to drive · Shift for full throttle · C for schedule · Esc to pause · M to mute</div>`);
     const opts: DialogOption[] = [];
     if (hasSave) opts.push({ label: 'Continue', key: '⏎', primary: true, onPick: onContinue });
     opts.push({ label: hasSave ? 'New business' : 'Start mowing', key: hasSave ? 'N' : '⏎', primary: !hasSave, onPick: onNew });
@@ -167,21 +210,36 @@ export class Hud {
     this.open(card, opts, 'center');
   }
 
-  /** End of the working day: summary, then the shop, then on to tomorrow. */
+  schedule(d: ScheduleData, onClose: () => void) {
+    const card = h('div', 'card wide', `<div class="card-title">📅 Week ${d.week} schedule</div>${scheduleGrid(d)}${forecastRow(d.forecast)}
+      <div class="legend"><span class="chip done">✓ done</span><span class="chip missed">✕ missed</span><span class="chip due">● due today</span><span class="chip later">booked</span></div>`);
+    const opts: DialogOption[] = [{ label: 'Back to work', key: 'C', primary: true, onPick: onClose }, { label: '', key: 'Esc', onPick: onClose }];
+    card.appendChild(this.buttons(opts.slice(0, 1)));
+    this.open(card, opts, 'center');
+  }
+
+  /** End of the working day: summary, the week ahead, the forecast, then the shop. */
   evening(o: {
-    day: number; earned: number; jobs: number; lines: string[]; money: number; rep: number;
-    up: Record<UpKey, number>; onBuy: (k: UpKey) => void; onNext: () => void;
+    title: string; earned: number; jobs: number; lines: string[]; money: number; rep: number;
+    schedule: ScheduleData; unlock: string | null;
+    up: Record<UpKey, number>; crew: { count: number; max: number; cost: number | null; wage: number };
+    onBuy: (k: UpKey) => void; onHire: () => void; onNext: () => void; nextLabel: string;
   }) {
-    const card = h('div', 'card evening', `
-      <div class="card-title">🌇 End of day ${o.day}</div>
+    const card = h('div', 'card wide evening', `
+      <div class="card-title">${o.title}</div>
       <div class="summary">
         <div><b>$${Math.round(o.earned)}</b><span>earned today</span></div>
         <div><b>${o.jobs}</b><span>lawns done</span></div>
         <div><b>${stars(o.rep)}</b><span>reputation ${o.rep.toFixed(1)}</span></div>
       </div>
       ${o.lines.length ? `<ul class="notes">${o.lines.map((l) => `<li>${l}</li>`).join('')}</ul>` : ''}
-      <div class="shop-title">Equipment shop <span class="cash">$${Math.floor(o.money)}</span></div>`);
+      ${o.unlock ? `<div class="unlock">${o.unlock}</div>` : ''}
+      <div class="section">This week</div>
+      ${scheduleGrid(o.schedule)}
+      ${forecastRow(o.schedule.forecast)}
+      <div class="section">Equipment &amp; crew <span class="cash">$${Math.floor(o.money)}</span></div>`);
     const shop = h('div', 'shop');
+    const opts: DialogOption[] = [{ label: o.nextLabel, key: '⏎', primary: true, onPick: o.onNext }];
     UPGRADES.forEach((u, i) => {
       const lvl = o.up[u.key], cost = u.costs[lvl];
       const maxed = cost === undefined;
@@ -193,12 +251,19 @@ export class Hud {
         <span class="k">${i + 1}</span>`);
       b.onclick = () => o.onBuy(u.key);
       shop.appendChild(b);
+      opts.push({ label: '', key: String(i + 1), onPick: () => o.onBuy(u.key) });
     });
+    const hk = String(UPGRADES.length + 1);
+    const crew = h('button', `item${o.crew.cost !== null && o.money >= o.crew.cost ? '' : ' dim'}`, `
+      <span class="icon">👷</span>
+      <span class="name">Hire crew<small>Mows your booked lawns for you · $${o.crew.wage}/day wage each</small></span>
+      <span class="lvl">${'●'.repeat(o.crew.count)}${'○'.repeat(o.crew.max - o.crew.count)}</span>
+      <span class="price">${o.crew.cost === null ? 'FULL' : `$${o.crew.cost}`}</span>
+      <span class="k">${hk}</span>`);
+    crew.onclick = o.onHire;
+    shop.appendChild(crew);
+    opts.push({ label: '', key: hk, onPick: o.onHire });
     card.appendChild(shop);
-    const opts: DialogOption[] = [
-      { label: `Start day ${o.day + 1}`, key: '⏎', primary: true, onPick: o.onNext },
-      ...UPGRADES.map((u, i) => ({ label: '', key: String(i + 1), onPick: () => o.onBuy(u.key) })),
-    ];
     card.appendChild(this.buttons(opts.slice(0, 1)));
     this.open(card, opts, 'center');
   }

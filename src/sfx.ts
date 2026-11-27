@@ -21,4 +21,27 @@ export class Sfx extends Synth {
   done() { this.arpeggio([523, 659, 784, 1047, 1319], 0.08, 0.35, 'triangle', 0.2); this.noise(0.6, 6000, 0.06, 0.1, 'highpass'); }
   evening() { this.arpeggio([784, 659, 523, 392], 0.2, 0.5, 'sine', 0.18); }
   morning() { this.arpeggio([392, 523, 659, 784], 0.12, 0.35, 'triangle', 0.16); }
+  trim() { this.noise(0.05, 3200 + Math.random() * 1500, 0.12, 0, 'bandpass'); this.noise(0.05, 2800, 0.1, 0.06, 'bandpass'); }
+  horn() { this.tone(392, 0.25, 'square', 0.08); this.tone(330, 0.3, 'square', 0.08, 0, 0.22); }
+  unlock2() { this.arpeggio([392, 523, 659, 784, 1047, 1319], 0.1, 0.4, 'triangle', 0.2); }
+  strike() { this.tone(196, 0.5, 'sawtooth', 0.1, -60); }
+
+  private rainGain: GainNode | null = null;
+  /** Rain on the roof: a looped band of noise faded to `level` (0..1). */
+  rain(level: number) {
+    if (!this.ctx || !this.master || !this.noiseBuf) return;
+    if (!this.rainGain) {
+      if (level < 0.01) return;
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuf;
+      src.loop = true;
+      const f = this.ctx.createBiquadFilter();
+      f.type = 'bandpass'; f.frequency.value = 1400; f.Q.value = 0.4;
+      this.rainGain = this.ctx.createGain();
+      this.rainGain.gain.value = 0;
+      src.connect(f).connect(this.rainGain).connect(this.master);
+      src.start();
+    }
+    this.rainGain.gain.setTargetAtTime(level * 0.16, this.ctx.currentTime, 0.5);
+  }
 }
