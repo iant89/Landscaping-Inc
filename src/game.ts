@@ -1140,8 +1140,11 @@ export class Game {
   // ---------------------------------------------------------------- knocking and bookings
   private checkKnock() {
     const m = this.active;
+    // A mower can nose up to the step; on foot you stop against the wall itself, so the walker needs
+    // a slightly bigger zone or the house box would always hold it just out of reach.
+    const R = this.riding ? 1.15 : 1.7;
     let inZone = -1;
-    for (const lot of this.world.lots) if (Math.abs(m.x - lot.door.x) < 2 && Math.abs(m.z - lot.door.z) < 2 && Math.hypot(m.x - lot.door.x, m.z - lot.door.z) < 1.15) inZone = lot.id;
+    for (const lot of this.world.lots) if (Math.abs(m.x - lot.door.x) < R + 1 && Math.abs(m.z - lot.door.z) < R + 1 && Math.hypot(m.x - lot.door.x, m.z - lot.door.z) < R) inZone = lot.id;
     if (inZone < 0) { this.knockLock = -1; return; }
     if (this.knockLock === inZone) return;
     this.knockLock = inZone;
