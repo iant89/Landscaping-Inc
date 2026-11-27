@@ -31,7 +31,6 @@ export class Sfx extends Synth {
   pour() { this.noise(0.5, 520, 0.1, 0, 'bandpass'); this.tone(140, 0.5, 'sine', 0.06, 60); }
   walk(step: number) { this.noise(0.06, 300 + step * 60, 0.035, 0); }
   hmm() { this.tone(392, 0.12, 'triangle', 0.09, 30); this.tone(330, 0.2, 'triangle', 0.08, -25, 0.12); }
-  win_() { this.arpeggio([659, 880, 1047], 0.08, 0.22, 'triangle', 0.16); }
 
   private rainGain: GainNode | null = null;
   /** Rain on the roof: a looped band of noise faded to `level` (0..1). */

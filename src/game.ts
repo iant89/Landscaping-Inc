@@ -1269,9 +1269,14 @@ export class Game {
     st.sweetened = true;
     this.sfx.hmm();
     this.closeDialog();
-    this.phase = 'play';
     this.hud.toast('🍪 You offer to waive the first visit. They soften a little.', 'info', 2400);
-    setTimeout(() => { if (this.phase === 'play' && st.status !== 'client') { st.status = 'prospect'; this.phase = 'dialog'; this.openPitch(lot); } }, 900);
+    setTimeout(() => {
+      if (this.phase !== 'play' || st.status === 'client' || st.status === 'job') return;
+      st.status = 'prospect';
+      st.tries = Math.max(1, st.tries); // keeps the haggle options on the card
+      this.phase = 'dialog';
+      this.openPitch(lot);
+    }, 900);
   }
 
   private retreat(lot: Lot) {
