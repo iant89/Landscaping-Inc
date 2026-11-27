@@ -331,7 +331,8 @@ export class Leaves {
       l.spin += (Math.random() - 0.5) * 10;
       l.tumbleV += (Math.random() - 0.5) * 12;
       l.air = 0.22;
-      l.lot = -1; // airborne leaves belong to nobody until they land again
+      // a leaf keeps its lot while it's in the air: blowing it off the driveway isn't the same as
+      // clearing it (the vac still has to do that)
       n++;
     }
     return n;

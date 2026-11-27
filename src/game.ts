@@ -584,12 +584,13 @@ export class Game {
     if (this.mapT <= 0) { this.mapT = 0.2; this.drawMinimap(); }
   };
 
-  /** A leaf just landed: a tiny puff of dust, and the lot it fell on gets it back. */
+  /** A leaf just landed: a tiny puff of dust where it settles. */
   private onLeafLand = (l: Leaf) => {
     if (Math.random() < 0.25) this.clips.spawn(l.x, 0.06, l.z, (Math.random() - 0.5) * 0.8, 0.4, (Math.random() - 0.5) * 0.8, 0.55, 0.35, 0.16, 0.06, 0.35, 9);
+    // a leaf that settles in someone's yard belongs to that yard now
     const c = this.cellAt(l.x, l.z);
     const o = c >= 0 ? this.world.owner[c] : -1;
-    if (o >= 0) l.lot = o; else l.alive = false;
+    if (o >= 0 && this.open(this.world.lots[o])) l.lot = o;
   };
 
   private updateTitle(dt: number) {
@@ -615,15 +616,16 @@ export class Game {
       m.o.decel = 7 * grip;
       m.o.turnRate = 10 * (0.55 + 0.45 * grip);
     }
-    const hit = m.update(dt, inp.x, inp.z, inp.m, this.world, this.boost ? 1.35 : 1);
+    const dry = this.riding && this.fuel <= 0;
+    const hit = m.update(dt, dry ? 0 : inp.x, dry ? 0 : inp.z, dry ? 0 : inp.m, this.world, this.boost ? 1.35 : 1);
     this.bumpCd -= dt;
     if (hit.impact > 2.4 && this.bumpCd <= 0) this.bump(hit.impact, hit.nx, hit.nz);
     const frac = Math.min(1, m.speed / (this.riding ? this.speedMax : this.feet.o.maxSpeed));
 
     let cutNow = 0;
     if (this.riding) {
-      cutNow = this.blades ? this.cutAround(dt) : this.idleDeck(dt);
-      if (this.blades) this.deckBlast(dt); else this.pushLeaves(dt);
+      cutNow = this.blades && !dry ? this.cutAround(dt) : this.idleDeck(dt);
+      if (this.blades && !dry) this.deckBlast(dt); else this.pushLeaves(dt);
       this.squashFlowers();
       this.vacuumLeaves(dt);
       if (this.blades) this.trimHedges();
@@ -1042,9 +1044,10 @@ export class Game {
       if (!this.canHinted) {
         this.canHinted = true;
         this.sfx.sputter();
+        this.sfx.drone(0, 0);
         this.hud.toast('🛢️ Out of gas — but you have the spare can. Press G to pour it in!', 'bad', 5000);
       }
-      if (!this.pouring) { this.mover.vx *= 1 - 6 * dt; this.mover.vz *= 1 - 6 * dt; }
+      this.mover.vx *= 1 - 6 * dt; this.mover.vz *= 1 - 6 * dt;
       return;
     }
     if (this.fuel <= 0) {
