@@ -1,10 +1,11 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { CELL, cellX, cellZ } from './config';
 import { LAWN_UNCUT, Lot, World, paintRect } from './world';
 
 const STUBBLE = 0.14;
-const STRIPE_LIGHT = ['#8fc862', '#93cc66', '#8ac45e'];
-const STRIPE_DARK = ['#62993f', '#5e9a3c', '#66a043'];
+const STRIPE_LIGHT = ['rgba(143,200,98,0.78)', 'rgba(147,204,102,0.78)', 'rgba(138,196,94,0.78)'];
+const STRIPE_DARK = ['rgba(98,153,63,0.82)', 'rgba(94,154,60,0.82)', 'rgba(102,160,67,0.82)'];
 
 export type CutKind = 'lawn' | 'edge' | null;
 
@@ -29,7 +30,7 @@ export class Grass {
     const lawn = world.lots.flatMap((l) => l.lawnCells);
     const edges = world.lots.flatMap((l) => l.edgeCells);
     const n = (lawn.length + edges.length) * perCell;
-    const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.85, metalness: 0 });
     mat.onBeforeCompile = (sh) => {
       sh.uniforms.uTime = this.time;
       sh.uniforms.uWind = this.wind;
@@ -150,7 +151,7 @@ function tuftGeometry() {
   return g;
 }
 
-/** One flower per flower-bed cell. Drive over them and they get squashed (and the owner notices). */
+/** One flower cluster per flower-bed cell. Drive over them and they get squashed (and the owner notices). */
 export class Flowers {
   mesh: THREE.InstancedMesh;
   private slot = new Map<number, number>();
@@ -160,22 +161,25 @@ export class Flowers {
 
   constructor(world: World) {
     const cells = world.lots.flatMap((l) => l.bedCells);
-    const geo = new THREE.IcosahedronGeometry(0.16, 0);
-    geo.translate(0, 0.32, 0);
-    this.mesh = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ flatShading: true }), cells.length);
+    const geo = flowerGeometry();
+    this.mesh = new THREE.InstancedMesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, metalness: 0 }), cells.length);
     this.squashed = new Uint8Array(cells.length);
-    const palette = ['#ff6fa1', '#ffd23a', '#b48cff', '#ff8c42', '#ffffff', '#ff4d5e'];
+    const palette = ['#ff6fa1', '#ffd23a', '#b48cff', '#ff8c42', '#fff6f0', '#ff4d5e', '#7ec8ff'];
     const m = new THREE.Matrix4();
     cells.forEach((c, k) => {
       this.slot.set(c, k);
       m.makeTranslation(cellX(c) + (Math.random() - 0.5) * 0.2, 0, cellZ(c) + (Math.random() - 0.5) * 0.2);
+      m.multiply(new THREE.Matrix4().makeRotationY(Math.random() * Math.PI * 2));
+      const sc = 0.85 + Math.random() * 0.4;
+      m.multiply(new THREE.Matrix4().makeScale(sc, sc, sc));
       this.base.push(m.clone());
       this.mesh.setMatrixAt(k, m);
-      const col = new THREE.Color(palette[Math.floor(Math.random() * palette.length)]);
-      this.colors.push(col);
-      this.mesh.setColorAt(k, col);
+      const col2 = new THREE.Color(palette[Math.floor(Math.random() * palette.length)]);
+      this.colors.push(col2);
+      this.mesh.setColorAt(k, col2);
     });
     this.mesh.castShadow = true;
+    this.mesh.receiveShadow = true;
     world.scene.add(this.mesh);
   }
 
@@ -184,7 +188,7 @@ export class Flowers {
     if (k === undefined || this.squashed[k]) return false;
     this.squashed[k] = 1;
     this.mesh.setMatrixAt(k, this.base[k].clone().multiply(new THREE.Matrix4().makeScale(1.4, 0.15, 1.4)));
-    this.mesh.setColorAt(k, new THREE.Color('#6b4b2a'));
+    this.mesh.setColorAt(k, new THREE.Color('#6b8a3a'));
     this.mesh.instanceMatrix.needsUpdate = true;
     this.mesh.instanceColor!.needsUpdate = true;
     return true;
@@ -198,9 +202,71 @@ export class Flowers {
   }
 }
 
-export interface Leaf { x: number; z: number; lot: number; alive: boolean; rot: number; tilt: number; fall: number }
+/**
+ * A little cluster: green stems and leaves with three blossoms on top, built once and merged so the
+ * whole flower bed is a single instanced draw. The blossom vertices are white so the per-instance
+ * colour tints only the petals; the stems keep a low vertex colour so they stay green.
+ */
+function flowerGeometry() {
+  const parts: THREE.BufferGeometry[] = [];
+  const tint = (src: THREE.BufferGeometry, stem: boolean) => {
+    // mergeGeometries needs every part to be indexed or every part non-indexed; primitives mix both
+    const g = src.index ? src.toNonIndexed() : src;
+    const n = g.attributes.position.count;
+    const col = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      if (stem) { col[i * 3] = 0.24; col[i * 3 + 1] = 0.45; col[i * 3 + 2] = 0.16; }
+      else { col[i * 3] = 1; col[i * 3 + 1] = 0.92; col[i * 3 + 2] = 0.95; }
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    return g;
+  };
+  for (let b = 0; b < 3; b++) {
+    const a = (b / 3) * Math.PI * 2 + 0.4;
+    const ox = Math.cos(a) * 0.1, oz = Math.sin(a) * 0.1;
+    const h = 0.24 + b * 0.035;
+    const stem = new THREE.CylinderGeometry(0.008, 0.012, h, 4);
+    stem.translate(ox, h / 2, oz);
+    parts.push(tint(stem, true));
+    // two little leaves on the stem
+    for (const side of [-1, 1]) {
+      const leaf = new THREE.SphereGeometry(0.045, 5, 3);
+      leaf.scale(1.6, 0.22, 0.8);
+      leaf.translate(ox + side * 0.05, h * 0.45, oz);
+      parts.push(tint(leaf, true));
+    }
+    const head = new THREE.IcosahedronGeometry(0.085, 0);
+    head.scale(1, 0.55, 1);
+    head.translate(ox, h, oz);
+    parts.push(tint(head, false));
+    const core = new THREE.SphereGeometry(0.032, 6, 4);
+    core.translate(ox, h + 0.03, oz);
+    parts.push(tint(core, false));
+  }
+  return mergeGeometries(parts);
+}
 
-/** Autumn leaves on each lot's sidewalk, driveway and path; the mower's vac sucks them up. */
+export interface Leaf {
+  x: number; z: number; lot: number; alive: boolean;
+  /** Height above the ground, and its vertical speed (positive = going up). */
+  y: number; vy: number;
+  /** Horizontal speed, which the wind and bounces push around. */
+  vx: number; vz: number;
+  /** Tumble: current yaw / pitch-and-roll and how fast each is changing. */
+  rot: number; spin: number; tumble: number; tumbleV: number;
+  /** Seconds until the ground grabs it again; > 0 means it is airborne and ignoring the floor. */
+  air: number;
+  /** A leaf still fluttering down from a tree. */
+  fall: number;
+}
+
+const GRAVITY = 9.5;
+
+/**
+ * Autumn leaves on each lot's sidewalk, driveway and path. They are little physics bodies: wind
+ * lifts them into the air, they tumble, they get knocked up by the mower's deck, and they drift back
+ * down to land somewhere new. The mower's vac sucks them up.
+ */
 export class Leaves {
   mesh: THREE.InstancedMesh;
   list: Leaf[] = [];
@@ -210,15 +276,17 @@ export class Leaves {
   private s = new THREE.Vector3(1, 1, 1);
   private p = new THREE.Vector3();
   static readonly MAX = 2400;
+  /** Called when a leaf is airborne at (x, z) — used for little gusts of dust. */
+  onLift: ((x: number, z: number) => void) | null = null;
 
   constructor(world: World) {
-    const geo = new THREE.CircleGeometry(0.16, 5);
-    geo.scale(1, 0.6, 1);
-    geo.rotateX(-Math.PI / 2);
-    this.mesh = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ side: THREE.DoubleSide }), Leaves.MAX);
-    const palette = ['#d9622b', '#c0392b', '#e8a23a', '#a0522d', '#d4ac0d'];
+    const geo = leafGeometry();
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.85, metalness: 0 });
+    this.mesh = new THREE.InstancedMesh(geo, mat, Leaves.MAX);
+    const palette = ['#d9622b', '#c0392b', '#e8a23a', '#a0522d', '#d4ac0d', '#b8461f'];
     for (let k = 0; k < Leaves.MAX; k++) this.mesh.setColorAt(k, new THREE.Color(palette[k % palette.length]));
     this.mesh.frustumCulled = false;
+    this.mesh.castShadow = false;
     world.scene.add(this.mesh);
   }
 
@@ -236,22 +304,106 @@ export class Leaves {
       this.list.splice(i, 1);
     }
     const c = lot.pavedCells[Math.floor(Math.random() * lot.pavedCells.length)];
-    this.list.push({ x: cellX(c) + (Math.random() - 0.5) * CELL, z: cellZ(c) + (Math.random() - 0.5) * CELL, lot: lot.id, alive: true, rot: Math.random() * 6, tilt: (Math.random() - 0.5) * 0.4, fall: falling ? 4 + Math.random() * 3 : 0 });
+    const f = falling ? 3 + Math.random() * 3 : 0;
+    this.list.push({
+      x: cellX(c) + (Math.random() - 0.5) * CELL, z: cellZ(c) + (Math.random() - 0.5) * CELL, lot: lot.id, alive: true,
+      y: falling ? 5 + Math.random() * 2.5 : 0, vy: 0, vx: (Math.random() - 0.5) * 0.6, vz: (Math.random() - 0.5) * 0.6,
+      rot: Math.random() * 6, spin: (Math.random() - 0.5) * 3, tumble: Math.random() * 6, tumbleV: (Math.random() - 0.5) * 3,
+      air: 0, fall: f,
+    });
   }
 
   left(lot: number) { let n = 0; for (const l of this.list) if (l.alive && l.lot === lot) n++; return n; }
 
-  update(dt: number, t: number, wind: number) {
+  /** Kick the leaves in a disc into the air (the mower's deck blast, a gust, a bump). */
+  gust(cx: number, cz: number, R: number, up: number, out: number, only = -1) {
+    let n = 0;
+    for (const l of this.list) {
+      if (!l.alive) continue;
+      if (only >= 0 && l.lot !== only) continue;
+      const dx = l.x - cx, dz = l.z - cz, d = Math.hypot(dx, dz);
+      if (d > R) continue;
+      const f = 1 - d / R;
+      const a = d > 0.01 ? Math.atan2(dz, dx) : Math.random() * Math.PI * 2;
+      l.vx += Math.cos(a) * out * f + (Math.random() - 0.5) * out * 0.4;
+      l.vz += Math.sin(a) * out * f + (Math.random() - 0.5) * out * 0.4;
+      l.vy = Math.max(l.vy, up * (0.35 + Math.random() * 0.65) * (0.4 + f));
+      l.spin += (Math.random() - 0.5) * 10;
+      l.tumbleV += (Math.random() - 0.5) * 12;
+      l.air = 0.22;
+      // a leaf keeps its lot while it's in the air: blowing it off the driveway isn't the same as
+      // clearing it (the vac still has to do that)
+      n++;
+    }
+    return n;
+  }
+
+  update(dt: number, t: number, wind: number, onLand?: (l: Leaf) => void) {
+    const drag = Math.exp(-1.5 * dt);
     for (let k = 0; k < Leaves.MAX; k++) {
       const l = this.list[k];
       if (!l || !l.alive) { this.mesh.setMatrixAt(k, this.m.makeScale(0, 0, 0)); continue; }
-      if (l.fall > 0) { l.fall = Math.max(0, l.fall - dt * 2.2); l.x += dt * wind * 0.8; l.rot += dt * 3; }
-      const flutter = Math.sin(t * 3 + l.rot * 5) * (0.08 + (wind - 1) * 0.1);
-      this.e.set(l.tilt + flutter, l.rot, l.fall > 0 ? Math.sin(t * 6 + l.rot) * 0.8 : 0);
+      const airborne = l.y > 0.001 || l.vy > 0;
+      if (airborne) {
+        if (l.air > 0) l.air = Math.max(0, l.air - dt);
+        l.vy -= GRAVITY * dt;
+        // wind pushes horizontally, a little air resistance slows the fall
+        l.vx += (wind * 1.5 - l.vx) * Math.min(1, dt * 0.9);
+        l.vz += (Math.sin(t * 0.5 + l.rot) * wind * 0.7 - l.vz) * Math.min(1, dt * 0.9);
+        if (l.vy < -2.4) l.vy = -2.4 + (l.vy + 2.4) * drag * 0.3;
+        l.x += l.vx * dt; l.z += l.vz * dt; l.y += l.vy * dt;
+        l.rot += l.spin * dt;
+        l.tumble += l.tumbleV * dt;
+        l.vx *= Math.exp(-0.8 * dt); l.vz *= Math.exp(-0.8 * dt);
+        l.spin *= Math.exp(-1.2 * dt); l.tumbleV *= Math.exp(-1.2 * dt);
+        if (l.y <= 0) {
+          const land = l.air <= 0 && l.vy < -1.2;
+          l.y = 0;
+          if (land) {
+            // settle flat on the ground with a little hop
+            l.vy = -l.vy * 0.28;
+            if (l.vy < 0.6) { l.vy = 0; l.tumble = 0; l.tumbleV *= 0.2; l.spin *= 0.3; }
+            onLand?.(l);
+          } else if (l.air <= 0) l.vy = 0;
+        }
+      } else if (l.fall > 0) {
+        // still fluttering down from its tree
+        l.fall = Math.max(0, l.fall - dt * 2.2);
+        l.x += dt * wind * 0.8; l.z += dt * Math.sin(t * 0.7 + l.rot) * 0.35;
+        l.rot += dt * 3;
+      }
+      const wobble = l.y > 0.01 ? Math.sin(t * 6 + l.rot) * 0.5 : 0;
+      this.e.set(l.y > 0.01 ? l.tumble : 0, l.rot, wobble);
       this.q.setFromEuler(this.e);
-      this.p.set(l.x, 0.03 + l.fall, l.z);
+      this.p.set(l.x, 0.012 + l.y, l.z);
       this.mesh.setMatrixAt(k, this.m.compose(this.p, this.q, this.s));
     }
     this.mesh.instanceMatrix.needsUpdate = true;
   }
+}
+
+/** A maple-ish leaf: five thin lobes fanned around a stem, with a warm rim so it reads at a glance. */
+function leafGeometry() {
+  const shape = new THREE.Shape();
+  const lobes = 5;
+  for (let i = 0; i <= 64; i++) {
+    const a = (i / 64) * Math.PI * 2;
+    const lobe = 0.55 + 0.45 * Math.abs(Math.cos((a * lobes) / 2));
+    const r = 0.17 * lobe;
+    const x = Math.cos(a) * r, y = Math.sin(a) * r;
+    if (i === 0) shape.moveTo(x, y); else shape.lineTo(x, y);
+  }
+  shape.closePath();
+  const g = new THREE.ShapeGeometry(shape, 2);
+  g.rotateX(-Math.PI / 2);
+  // colour the rim slightly brighter so leaves catch the light
+  const pos = g.attributes.position;
+  const col: number[] = [];
+  for (let i = 0; i < pos.count; i++) {
+    const d = Math.hypot(pos.getX(i), pos.getZ(i)) / 0.17;
+    const k = 0.75 + Math.min(1, d) * 0.5;
+    col.push(k, k * 0.96, k * 0.9);
+  }
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  return g;
 }

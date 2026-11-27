@@ -25,6 +25,12 @@ export class Sfx extends Synth {
   horn() { this.tone(392, 0.25, 'square', 0.08); this.tone(330, 0.3, 'square', 0.08, 0, 0.22); }
   unlock2() { this.arpeggio([392, 523, 659, 784, 1047, 1319], 0.1, 0.4, 'triangle', 0.2); }
   strike() { this.tone(196, 0.5, 'sawtooth', 0.1, -60); }
+  dismount() { this.tone(240, 0.12, 'triangle', 0.1, 90); this.noise(0.12, 900, 0.06, 0.06); }
+  mount() { this.tone(320, 0.1, 'triangle', 0.1, -60); this.noise(0.1, 700, 0.05, 0.04); }
+  blade(on: boolean) { this.tone(on ? 180 : 120, 0.18, 'sawtooth', 0.09, on ? 120 : -70); this.noise(0.14, on ? 1400 : 700, 0.06, 0.02, 'bandpass'); }
+  pour() { this.noise(0.5, 520, 0.1, 0, 'bandpass'); this.tone(140, 0.5, 'sine', 0.06, 60); }
+  walk(step: number) { this.noise(0.06, 300 + step * 60, 0.035, 0); }
+  hmm() { this.tone(392, 0.12, 'triangle', 0.09, 30); this.tone(330, 0.2, 'triangle', 0.08, -25, 0.12); }
 
   private rainGain: GainNode | null = null;
   /** Rain on the roof: a looped band of noise faded to `level` (0..1). */

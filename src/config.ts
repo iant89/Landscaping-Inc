@@ -55,6 +55,23 @@ export const PUMP_R = 1.5;
 export const FUEL_PRICE = 0.15;
 export const TOW_FEE = 25;
 
+/** Fuel burn, in fuel units per second: idling, driving, full throttle, blades spinning, mowing. */
+export const BURN = { idle: 0.1, drive: 0.42, boost: 0.5, blades: 0.16, cut: 0.16, rigIdle: 0.05, rigDrive: 0.22, rigBoost: 0.3 };
+/** The spare can in the truck bed starts half full, and takes this many seconds to pour in. */
+export const CAN_FRACTION = 0.5;
+export const CAN_POUR_TIME = 1.6;
+
+/** Truck and trailer. */
+export const RIG_SPEED = 4.6;
+/** How far the mower can be from the trailer to load it. */
+export const RIG_RANGE = 6.5;
+/** Seconds for the winch to drag the mower on (or roll it off). */
+export const LOAD_TIME = 1.4;
+/** You can only drop the rig on open ground this far from a road's centre line. */
+export const YARD_ROAD_MAX = 26;
+/** The hand-held tools run off their own little tank (units per second while working). */
+export const TOOL_BURN = 0.05;
+
 /** Crew. */
 export const HELPER_COST = [150, 250, 400];
 export const HELPER_WAGE = 25;

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { dampK } from './math';
+import { dampK, lerpAngle } from './math';
 
 export interface FollowCameraOptions {
   /** Camera offset from the focus point (above and behind). */
@@ -41,6 +41,14 @@ export class FollowCamera {
   o: FollowCameraOptions;
   focus = new THREE.Vector3();
   trauma = 0;
+  /**
+   * The yaw the camera is actually at (already eased). The view only turns when the game or the
+   * player turns it, so the direction "up" on the keys never drifts underneath you.
+   */
+  angle = 0;
+  /** Where `angle` is easing toward. Set it and call update(); the camera does the smoothing. */
+  autoTarget: number | null = null;
+  /** Current FOV (eased between the normal and boost values). */
   private fovNow: number;
 
   /** `onProjection` is called when the FOV changes (the Engine uses it to rescale particles). */
@@ -53,21 +61,50 @@ export class FollowCamera {
 
   addTrauma(v: number) { this.trauma = Math.min(1, this.trauma + v); }
 
-  /** Where the camera sits for a given focus point (accounts for portrait aspect). */
-  positionFor(focus: THREE.Vector3, out = new THREE.Vector3()) {
-    const a = this.camera.aspect;
-    const k = a < 1 ? 1 + (1 - a) * this.o.portraitPullback : 1;
-    return out.set(focus.x + this.o.offset.x * k, focus.y + this.o.offset.y * k, focus.z + this.o.offset.z * k);
-  }
-
-  /** Jump straight to the target with no glide (after teleports, level loads, cutscenes). */
-  snap(x: number, z: number) {
-    this.focus.set(x, 0, z);
+  /** Turn the view to `target` with no glide at all (after a teleport, or when the player asks). */
+  snapAngle(target: number) {
+    this.autoTarget = null;
+    this.angle = target;
     this.camera.position.copy(this.positionFor(this.focus));
     this.lookAtFocus();
   }
 
+  /** Where the camera sits for a given focus point (accounts for portrait aspect). */
+  positionFor(focus: THREE.Vector3, out = new THREE.Vector3()) {
+    const a = this.camera.aspect;
+    const k = a < 1 ? 1 + (1 - a) * this.o.portraitPullback : 1;
+    // swing the offset around the focus by the settled camera angle
+    const c = Math.cos(this.angle), s = Math.sin(this.angle);
+    const ox = this.o.offset.x * c + this.o.offset.z * s;
+    const oz = -this.o.offset.x * s + this.o.offset.z * c;
+    return out.set(focus.x + ox * k, focus.y + this.o.offset.y * k, focus.z + oz * k);
+  }
+
+  /** Turn the camera by hand (radians). Cancels any ease toward a target. */
+  turn(by: number) {
+    this.autoTarget = null;
+    this.angle += by;
+  }
+
+  /**
+   * Jump straight to the target with no glide (after teleports, level loads, cutscenes). A teleport
+   * usually comes with a new facing, so the view snaps in behind it too.
+   */
+  snap(x: number, z: number, yaw?: number) {
+    this.focus.set(x, 0, z);
+    if (yaw !== undefined) { this.autoTarget = null; this.angle = yaw; }
+    this.camera.position.copy(this.positionFor(this.focus));
+    this.lookAtFocus();
+  }
+
+  /** Where the camera is looking, in world yaw (0 = toward -Z, matching a Mover's yaw). */
+  get yaw() { return this.angle; }
+
   update(dt: number, x: number, z: number, vx = 0, vz = 0, boost = false) {
+    if (this.autoTarget !== null) {
+      this.angle = lerpAngle(this.angle, this.autoTarget, dampK(1.7, dt));
+      if (Math.abs(this.autoTarget - this.angle) < 0.002) this.autoTarget = null;
+    }
     this.track(dt, x, z, vx, vz, boost);
     this.shake(dt);
   }
@@ -91,7 +128,12 @@ export class FollowCamera {
   }
 
   /** Point the camera at the current focus (after moving it yourself). */
-  lookAtFocus() { this.camera.lookAt(this.focus.x, 0, this.focus.z - this.o.lookAhead); }
+  lookAtFocus() {
+    // look a little past the focus, in whatever direction the view now faces
+    const a = this.angle;
+    this.camera.lookAt(this.focus.x - Math.sin(a) * this.o.lookAhead, 0, this.focus.z - Math.cos(a) * this.o.lookAhead);
+  }
+
 
   /** Apply (and decay) screen shake on top of wherever the camera currently is. */
   shake(dt: number) {

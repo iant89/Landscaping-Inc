@@ -1,13 +1,17 @@
 import * as THREE from 'three';
-import { Engine, FollowCamera, Input, Mover, Particles, Popups, Squash, TouchStick, clamp, poseBody } from '../engine/src';
+import { DEFAULT_KEYMAP, Engine, FollowCamera, Input, Mover, Particles, Popups, Squash, TouchStick, clamp, lerpAngle, poseBody } from '../engine/src';
 import {
-  CELL, CROSS_MID, DAY_END, DAY_START, FUEL_PRICE, GH, GW, HELPER_COST, HELPER_NAMES, HELPER_WAGE, K_BED, K_LAWN,
-  MAX_STRIKES, MAX_X, MAX_Z, MIN_X, MIN_Z, PUMP, PUMP_R, SEC_PER_HOUR, STREETS, TOW_FEE, UPGRADES, UpKey, WEEKDAYS,
-  WEEKDAYS_LONG, cellX, cellZ, fmtHour, streetZ,
+  BURN, CAN_FRACTION, CAN_POUR_TIME, CELL, CROSS_MID, DAY_END, DAY_START, FUEL_PRICE, GH, GW, HELPER_COST, HELPER_NAMES,
+  HELPER_WAGE, K_BED, K_LAWN, LOAD_TIME, MAX_STRIKES, MAX_X, MAX_Z, MIN_X, MIN_Z, PUMP, PUMP_R, RIG_RANGE, RIG_SPEED,
+  SEC_PER_HOUR, STREETS, TOW_FEE, TOOL_BURN, UPGRADES, UpKey, WEEKDAYS, WEEKDAYS_LONG, YARD_ROAD_MAX, cellX, cellZ,
+  fmtHour, streetAt, streetZ,
 } from './config';
-import { Flowers, Grass, Leaves } from './lawn';
+import { Flowers, Grass, Leaf, Leaves } from './lawn';
 import { CREW_COLORS, MowerModel, RIVAL_COLORS, animateMower, buildMower } from './mower';
-import { Hud, JobLine, ScheduleCell, ScheduleData } from './hud';
+import { WalkerModel, animateWalker, buildFuelCan, buildWalker } from './avatar';
+import { TOOLS, ToolId, ToolModel, buildFuelArrow, buildTool, toolDef } from './equipment';
+import { RigModel, buildTrailer, buildTruck } from './rig';
+import { DialogOption, Hud, JobLine, ScheduleCell, ScheduleData } from './hud';
 import { Npc, leaveLot, mowPlan, routeTo } from './npc';
 import { Sfx } from './sfx';
 import { Rain, WEATHER, Weather, rollWeather } from './weather';
@@ -42,6 +46,12 @@ interface LotState {
   edgeCut: number;
   /** Today's offer, so knocking twice shows the same terms. */
   offer: Offer | null;
+  /** How many times they've turned you down today; 3 and they're done. */
+  tries: number;
+  /** Times you've talked about money today (used for the grumpier line). */
+  asked: number;
+  /** You waived the first visit to soften them up. */
+  sweetened: boolean;
   /** Crew member working this lot today, or -1. */
   crew: number;
 }
@@ -50,18 +60,63 @@ interface Crew { npc: Npc; name: string; lot: number }
 interface Gnome { obj: THREE.Group; hx: number; hz: number; x: number; z: number; vx: number; vz: number; spin: number; tip: number; knocked: boolean; lot: number }
 
 interface SaveFile {
-  v: 2; money: number; rep: number; day: number; fuel: number; up: Record<UpKey, number>;
+  v: 4; money: number; rep: number; day: number; fuel: number; up: Record<UpKey, number>;
   crew: number; streets: number; forecast: Weather[]; week: Record<string, 'done' | 'missed'>;
   hedges: number[];
+  /** fuel left in the spare can (fraction of a full tank), and whether the blades are engaged. */
+  can: number;
+  /** The rig's parking spot, what's strapped to the trailer, and the tool in hand. */
+  rigHome: { x: number; z: number; yaw: number };
+  mowerLoaded: boolean;
+  tool: ToolId | null;
+  toolFuel: number;
+  /** True once the opening tutorial has been finished (or skipped). */
+  tutDone: boolean;
   lots: Pick<LotState, 'status' | 'grumpy' | 'pay' | 'days' | 'services' | 'strikes' | 'good' | 'rivalDays' | 'level'>[];
 }
-const SAVE_KEY = 'li_save_v2';
+const SAVE_KEY = 'li_save_v4';
 const RIVAL = 'Green Giant Lawns';
 const RIVAL_HOME = { x: CROSS_MID + 1.8, z: 14 };
+/** Where the truck and trailer start each morning: on the road, just east of the pump. */
+const RIG_HOME = { x: PUMP.x + 5.6, z: PUMP.z, yaw: -Math.PI / 2 };
 
 const NO_THANKS = [
   '"We\'re fine, thanks. My nephew does it."', '"Not today, sweetie."', '"I\'ll think about it." *door closes*',
   '"Is this a timeshare thing? No."', '"We like it wild. For the bees."', '"Maybe tomorrow, I\'m on a call."',
+];
+
+/** The guided tour shown at the start of a new game. `done` fires when the player does the thing. */
+const TUTORIAL_STEPS: { icon: string; title: string; body: string; keys: string; done?: string }[] = [
+  {
+    icon: '🚜', title: 'Welcome to Landscaping Inc.',
+    body: 'You have a mower, a truck, a trailer and $30. Drive up to a front door marked <b>!</b> and knock — the owner will tell you what they want and you pitch a price.',
+    keys: 'WASD / arrows drive · Shift full throttle', done: 'drive',
+  },
+  {
+    icon: '🌱', title: 'Mowing pays the bills',
+    body: 'Drive over every bit of lawn in a job to finish it. The grass bar in the bottom left shows how much is left. Cutting costs fuel, so watch the gauge.',
+    keys: 'B switches the blades · E hops off', done: 'blades',
+  },
+  {
+    icon: '🚶', title: 'Walk to save fuel',
+    body: 'Park up and press <b>E</b> to walk. A parked mower barely sips fuel, and you can knock on doors on foot. Press <b>E</b> next to it to climb back on.',
+    keys: 'E in and out of anything', done: 'walk',
+  },
+  {
+    icon: '🧰', title: 'The trailer has the gear',
+    body: 'Walk to the trailer and press <b>T</b> to take a weed eater, hedge trimmer or leaf blower. They do one service each — handier than dragging the mower across the lawn.',
+    keys: 'T opens the trailer', done: 'tool',
+  },
+  {
+    icon: '🚚', title: 'Move the whole yard',
+    body: 'The mower rides on the trailer. To work the far end of a street, put it back and drive the truck — no more long slow trips to the pump.',
+    keys: 'Drive the rig to any clear grass', done: 'rig',
+  },
+  {
+    icon: '⛽', title: 'Never get stranded',
+    body: 'There is a spare can of fuel on the truck. If you do run dry, press <b>G</b> to pour it in — and if the can is empty too, an arrow appears pointing you to the nearest pump.',
+    keys: 'G pours the can · C for the schedule', done: 'load',
+  },
 ];
 
 const freshUp = (): Record<UpKey, number> => ({ deck: 0, engine: 0, tank: 0, bagger: 0, tires: 0 });
@@ -85,9 +140,69 @@ export class Game {
   hud: Hud;
   clips: Particles;
   sparks: Particles;
+  smoke: Particles;
   rain: Rain;
   markers: THREE.Sprite[] = [];
   private markerTex: Record<string, THREE.Texture> = {};
+
+  // --- vehicles and on foot
+  walker: WalkerModel;
+  /** The player's own mover when riding the rig or the mower (or, in legacy terms, driving). */
+  feet = new Mover({ radius: 0.42, maxSpeed: 3.9, accel: 14, decel: 11, turnRate: 12 });
+  /** Which vehicle you're driving, or null when you're on your feet. */
+  mounted: 'mower' | 'rig' | null = 'mower';
+  /** Kept as a convenience alias so the HUD/telemetry reads naturally. */
+  get riding() { return this.mounted !== null; }
+  rigMover = new Mover({ radius: 1.5, maxSpeed: RIG_SPEED, accel: 7, decel: 5.2, turnRate: 5.5 });
+  /** Where the truck and trailer are parked (a point on the ground the rig sits at). */
+  rigHome = { x: 0, z: 0, yaw: 0 };
+  /** The trailer swings behind the truck: it lags the hitch point. */
+  trailer = { x: 0, z: 0, yaw: 0, vx: 0, vz: 0 };
+  truck: RigModel;
+  trailerModel: RigModel;
+  /** The tools hanging on the trailer rack, one per TOOLS entry. */
+  rackTools: THREE.Group[] = [];
+  /** True while the mower is strapped to the trailer. */
+  mowerLoaded = true;
+  /** > 0 while the winch is dragging the mower on or off. */
+  loading = 0;
+  /** The tool you have in your hands on foot, or null. */
+  tool: ToolId | null = null;
+  toolModel: ToolModel | null = null;
+  /** Fuel in the hand tools' little tank. */
+  toolFuel = 0;
+  /** Set while a tool is actually working (blade spinning / fan blowing). */
+  toolActive = false;
+  fuelArrow = new THREE.Group();
+  /** 'load' or 'unload' while the winch runs. */
+  loadKind: 'load' | 'unload' = 'load';
+  private toolT = 0;
+  /** Tutorial progress: which card is showing. */
+  tutorialStep = 0;
+  /** Set when you first start: shows the guided tour of the basics. */
+  tutorialOn = false;
+  /** Set once the tour is finished or skipped, so it never shows twice. */
+  tutorialDone = false;
+  private tutT = 0;
+  /** Where the mower is parked, so you can climb back on. */
+  mowerPark = { x: 0, z: 0, yaw: 0 };
+  /** The spare can's model, carried or left by the mower. */
+  canModel: THREE.Group;
+  /** Fuel left in the spare can, in the same units as the tank. */
+  canFuel = 0;
+  /** > 0 while pouring the can into the tank. */
+  pouring = 0;
+  /** Blades are engaged: cutting grass costs extra fuel, disengaged saves it. */
+  blades = true;
+  private walkHinted = false;
+  private trailerHinted = false;
+  private bladeHinted = false;
+  private walkT = 0;
+  private deckT = 0;
+  private puffT = 0;
+  private cloudT = 0;
+  private clouds: THREE.Sprite[] = [];
+  private canHinted = false;
   gnomes: Gnome[] = [];
   crew: Crew[] = [];
   rival: { npc: Npc; target: number; active: boolean };
@@ -146,6 +261,7 @@ export class Game {
       shadows: true,
     });
     this.world = buildWorld(7);
+    this.clouds = this.world.clouds;
     if (this.engine.isTouch) this.world.sun.shadow.mapSize.set(1024, 1024);
     this.engine.scene = this.world.scene;
     this.grass = new Grass(this.world, this.engine.isTouch ? 1 : 2);
@@ -153,12 +269,37 @@ export class Game {
     this.leaves = new Leaves(this.world);
     this.clips = this.engine.addParticles(1200, false);
     this.sparks = this.engine.addParticles(700, true);
+    this.smoke = this.engine.addParticles(400, false);
     this.rain = new Rain(this.world.scene);
     this.model = buildMower();
     this.world.scene.add(this.model.root);
-    this.cam = new FollowCamera(this.engine.camera, { offset: new THREE.Vector3(0, 14.5, 7.5), boostFov: 6 }, this.engine.syncProjection);
-    this.controls = new Input({ capture: () => this.phase === 'play', onKey: this.onKey });
+    this.walker = buildWalker();
+    this.walker.root.visible = false;
+    this.world.scene.add(this.walker.root);
+    this.canModel = buildFuelCan();
+    this.canModel.visible = false;
+    this.world.scene.add(this.canModel);
+    this.truck = buildTruck();
+    this.trailerModel = buildTrailer();
+    // the three hand tools hang on the trailer's rack until you take one
+    this.trailerModel.toolSlots.forEach((slot, i) => {
+      const t = buildTool(TOOLS[i].id);
+      t.root.scale.setScalar(0.72);
+      t.root.rotation.set(-1.15, 0, 0);
+      t.root.position.set(0, -0.18, 0.05);
+      slot.add(t.root);
+      this.rackTools.push(t.root);
+    });
+    this.world.scene.add(this.truck.root, this.trailerModel.root);
+    this.fuelArrow = buildFuelArrow();
+    this.fuelArrow.visible = false;
+    this.fuelArrow.renderOrder = 40;
+    this.world.scene.add(this.fuelArrow);
+    this.parkRigAt(RIG_HOME.x, RIG_HOME.z, RIG_HOME.yaw);
+    this.cam = new FollowCamera(this.engine.camera, { offset: new THREE.Vector3(0, 13.2, 7.0), boostFov: 6 }, this.engine.syncProjection);
+    this.controls = new Input({ keymap: { ...DEFAULT_KEYMAP, KeyF: 'tool' }, capture: () => this.phase === 'play', onKey: this.onKey });
     new TouchStick(container, this.controls);
+    this.setupOrbit();
     this.popups = new Popups(container);
     this.hud = new Hud(container, this.engine.isTouch, (b) => this.controls.setBoost(b), () => this.pause(), () => this.toggleSchedule());
     container.addEventListener('pointerdown', () => this.sfx.unlock());
@@ -178,7 +319,7 @@ export class Game {
     return {
       status: 'prospect', deadline: DAY_END, pay: 0, days: [], services: noServices(), doneToday: false,
       grumpy: Math.random() * 0.6, strikes: 0, good: 0, rivalDays: 0, level: 0.7 + Math.random() * 0.3,
-      flowers: 0, gnome: false, cut: 0, edgeCut: 0, offer: null, crew: -1,
+      flowers: 0, gnome: false, cut: 0, edgeCut: 0, offer: null, tries: 0, asked: 0, sweetened: false, crew: -1,
     };
   }
 
@@ -197,6 +338,10 @@ export class Game {
   private newGame() {
     this.sfx.unlock();
     this.money = 30; this.rep = 3; this.day = 1; this.up = freshUp(); this.fuel = this.fuelMax;
+    this.canFuel = this.fuelMax * CAN_FRACTION;
+    this.tool = null;
+    this.toolFuel = this.toolFuelMax;
+    this.blades = true;
     this.lots = this.world.lots.map(() => this.freshLot());
     this.week = {};
     this.forecast = ['sunny', rollWeather('sunny'), rollWeather(null), rollWeather(null)];
@@ -204,8 +349,23 @@ export class Game {
     this.setCrew(0);
     this.setStreets(1);
     for (const h of this.world.hedges) { h.shaggy = true; h.regrow = 0; }
+    this.tutorialDone = false;
+    this.parkRigAt(RIG_HOME.x, RIG_HOME.z, RIG_HOME.yaw);
+    this.mowerLoaded = false;
+    this.mowerPark = { x: this.mover.x, z: this.mover.z, yaw: this.mover.yaw };
     this.startDay();
-    setTimeout(() => this.hud.toast('Drive to a front door marked <b>!</b> to knock and offer your services', 'info', 4200), 1800);
+    this.beginTutorial();
+  }
+
+  /** Kick off the guided tour: the game keeps running behind it, so you can learn by doing. */
+  private beginTutorial() {
+    this.tutorialOn = true;
+    this.tutorialStep = -1;
+    this.tutT = 0;
+    this.hud.close();
+    this.phase = 'play';
+    this.engine.resetClock();
+    this.showTutorial(0);
   }
 
   private continueGame() {
@@ -214,13 +374,20 @@ export class Game {
     this.sfx.unlock();
     this.money = s.money; this.rep = s.rep; this.day = s.day; this.up = { ...freshUp(), ...s.up };
     this.fuel = Math.min(this.fuelMax, s.fuel);
+    this.canFuel = s.can === undefined ? this.fuelMax * CAN_FRACTION : s.can * this.fuelMax;
     this.lots = this.world.lots.map((_, i) => ({ ...this.freshLot(), ...(s.lots[i] ?? {}) }));
     this.forecast = [...s.forecast, 'sunny', 'cloudy', 'sunny', 'sunny'].slice(0, 4) as Weather[];
     this.week = s.week ?? {};
     this.world.hedges.forEach((h, i) => { h.regrow = s.hedges[i] ?? 0; h.shaggy = h.regrow <= 0; });
     this.setCrew(s.crew);
     this.setStreets(s.streets);
+    this.parkRigAt(s.rigHome.x, s.rigHome.z, s.rigHome.yaw);
+    this.mowerLoaded = s.mowerLoaded;
+    this.toolFuel = s.toolFuel;
+    this.tutorialDone = s.tutDone;
     this.startDay();
+    if (!s.mowerLoaded) this.mowerPark = { x: this.trailer.x - Math.sin(this.trailer.yaw) * 2.6, z: this.trailer.z - Math.cos(this.trailer.yaw) * 2.6, yaw: this.trailer.yaw };
+    if (s.tool) this.pickTool(s.tool, true);
   }
 
   private setCrew(n: number) {
@@ -250,14 +417,23 @@ export class Game {
     let booked = 0;
     this.lots.forEach((st) => {
       if (st.status === 'declined' || st.status === 'job') st.status = 'prospect';
-      st.doneToday = false; st.flowers = 0; st.gnome = false; st.cut = 0; st.edgeCut = 0; st.offer = null; st.crew = -1;
+      st.doneToday = false; st.flowers = 0; st.gnome = false; st.cut = 0; st.edgeCut = 0; st.offer = null; st.crew = -1; st.tries = 0; st.asked = 0; st.sweetened = false;
       st.deadline = DAY_END;
       if (this.isDue(st)) booked++;
     });
     this.earnedToday = 0; this.mownToday = 0; this.notes = [];
-    this.placeAtPump();
+    if (this.mowerLoaded) {
+      // the mower is still strapped on from yesterday: the morning starts in the truck at the yard
+      this.parkRigAt(this.rigHome.x, this.rigHome.z, this.rigHome.yaw);
+      this.mounted = 'rig';
+      this.blades = false;
+      this.pouring = 0;
+    } else {
+      this.placeAtPump();
+      this.parkRigAt(this.rigHome.x, this.rigHome.z, this.rigHome.yaw);
+    }
     this.squash.reset();
-    this.cam.snap(this.mover.x, this.mover.z);
+    this.cam.snap(this.active.x, this.active.z, this.active.yaw);
     this.crew.forEach((c, i) => { c.lot = -1; c.npc.place(i * 3, 1.6); });
     this.rival.npc.place(RIVAL_HOME.x, RIVAL_HOME.z);
     this.rival.target = -1;
@@ -365,7 +541,7 @@ export class Game {
       schedule: this.scheduleData(), unlock: this.unlockLine(), up: this.up,
       crew: { count: this.crew.length, max: HELPER_COST.length, cost: HELPER_COST[this.crew.length] ?? null, wage: HELPER_WAGE },
       onBuy: (k) => this.buy(k),
-      onHire: () => this.hire(),
+      onHire: () => this.hireCrew(),
       onNext: () => this.startDay(),
       nextLabel: `Start ${WEEKDAYS_LONG[this.weekday]}`,
     });
@@ -384,7 +560,7 @@ export class Game {
     this.showEvening();
   }
 
-  private hire() {
+  private hireCrew() {
     const cost = HELPER_COST[this.crew.length];
     if (cost === undefined || this.money < cost) { this.sfx.deny(); return; }
     this.money -= cost;
@@ -399,7 +575,13 @@ export class Game {
     if (this.phase !== 'play') return;
     this.phase = 'paused';
     this.sfx.drone(0, 0);
-    this.hud.pause(() => this.resume(), () => { this.sfx.setMuted(!this.sfx.muted); this.phase = 'play'; this.pause(); }, this.sfx.muted, () => { this.save(); this.showTitle(); });
+    this.hud.pause(
+      () => this.resume(),
+      () => { this.sfx.setMuted(!this.sfx.muted); this.phase = 'play'; this.pause(); },
+      this.sfx.muted,
+      () => { this.save(); this.showTitle(); },
+      () => { this.hud.controls(() => { this.phase = 'play'; this.pause(); }); },
+    );
   }
 
   private resume() { if (this.phase === 'paused' || this.phase === 'schedule') { this.hud.close(); this.phase = 'play'; this.engine.resetClock(); } }
@@ -432,20 +614,246 @@ export class Game {
     return { week: this.weekNo, today, days, forecast };
   }
 
+  /** Middle-mouse drag orbits the camera around the player; drag up/down tilts a little. */
+  private orbitDrag: { x: number; y: number } | null = null;
+  /** What we were driving last frame, and how long the camera has to settle into the new distance. */
+  private camMode: 'mower' | 'rig' | null | undefined = undefined;
+  private camEase = 0;
+  /** Seconds the player has been standing still, so the camera only settles behind them at rest. */
+  private idleT = 0;
+
+  private setupOrbit() {
+    const el = this.engine.renderer.domElement;
+    // stop the browser's middle-click autoscroll stealing the drag
+    el.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
+    el.addEventListener('pointerdown', (e) => {
+      // middle button, or shift-drag for laptops without one
+      if (e.button !== 1 && !(e.button === 0 && e.shiftKey)) return;
+      e.preventDefault();
+      this.orbitDrag = { x: e.clientX, y: e.clientY };
+      el.setPointerCapture(e.pointerId);
+    });
+    el.addEventListener('pointermove', (e) => {
+      const d = this.orbitDrag;
+      if (!d) return;
+      if (Math.abs(e.clientX - d.x) > 0) this.cam.turn(-(e.clientX - d.x) * 0.006);
+      // tilt: raise or lower the camera a touch, clamped so you never end up under the ground
+      const tilt = -(e.clientY - d.y) * 0.02;
+      this.cam.o.offset.y = clamp(this.cam.o.offset.y + tilt, 4.5, 20);
+      this.cam.o.offset.z = clamp(this.cam.o.offset.z - tilt * 0.35, 2.2, 12);
+      d.x = e.clientX; d.y = e.clientY;
+    });
+    const end = (e: PointerEvent) => {
+      if (!this.orbitDrag) return;
+      this.orbitDrag = null;
+      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+    };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+  }
+
   private onKey = (code: string, e: KeyboardEvent) => {
     this.sfx.unlock();
     if (this.hud.overlayOpen && this.hud.key(code)) { e.preventDefault(); return; }
     if (code === 'KeyM') this.sfx.setMuted(!this.sfx.muted);
     if (code === 'KeyC' || code === 'Tab') { e.preventDefault(); this.toggleSchedule(); }
     if (this.phase === 'play' && (code === 'Escape' || code === 'KeyP')) this.pause();
+    if (this.phase !== 'play') return;
+    if (code === 'KeyE') this.mounted !== null ? this.dismount() : this.mount();
+    if (code === 'KeyB' && this.mounted !== null) this.toggleBlades();
+    if (code === 'KeyG') this.startPour();
+    if (code === 'KeyL') this.toggleLoad();
+    if (code === 'KeyH' && !this.tutorialOn) this.beginTutorial();
+    if (code === 'KeyR' && this.orbitDrag === null) {
+      // put the camera back behind whatever you're driving (or facing north on foot), instantly
+      this.cam.autoTarget = null;
+      this.cam.snapAngle(this.mounted !== null ? this.active.yaw : 0);
+      this.cam.o.offset.y = this.mounted === 'rig' ? 16.5 : this.mounted === 'mower' ? 13.2 : 8.4;
+      this.cam.o.offset.z = this.mounted === 'rig' ? 9.0 : this.mounted === 'mower' ? 7.0 : 4.9;
+    }
+    if (code === 'KeyT') this.openTrailer();
   };
+
+  // ---------------------------------------------------------------- the rig (truck + trailer)
+  /** Park the whole rig at a spot, with the trailer lined up behind the truck. */
+  parkRigAt(x: number, z: number, yaw = Math.PI / 2) {
+    this.rigMover.place(x, z, yaw);
+    this.rigHome = { x, z, yaw };
+    const hx = x - Math.sin(yaw) * 3.2, hz = z - Math.cos(yaw) * 3.2;
+    this.trailer = { x: hx - Math.sin(yaw) * 2.4, z: hz - Math.cos(yaw) * 2.4, yaw, vx: 0, vz: 0 };
+    this.poseRigStatic(yaw);
+  }
+
+  /** L: drop the ramps, or winch the mower back on. Works from either seat. */
+  toggleLoad() {
+    if (this.phase !== 'play' || this.loading > 0) return;
+    if (this.mounted === 'rig' && this.mowerLoaded) { this.openRig(); return; }
+    if (this.mowedOffNearby()) { this.loadMower(); this.tutorialFire('rig'); return; }
+    this.hud.toast(this.mowerLoaded ? 'The mower is already on the trailer.' : 'Bring the rig (or yourself) within 6 m of the mower.', 'info', 2400);
+  }
+
+  /** Is the mower close enough to winch on? */
+  private mowedOffNearby() {
+    if (this.mowerLoaded) return false;
+    return Math.min(
+      Math.hypot(this.active.x - this.mowerPark.x, this.active.z - this.mowerPark.z),
+      Math.hypot(this.rigMover.x - this.mowerPark.x, this.rigMover.z - this.mowerPark.z),
+    ) <= RIG_RANGE;
+  }
+
+  private startRig() {
+    // the trailer picks up from where it was left
+    this.trailer.vx = 0;
+    this.trailer.vz = 0;
+  }
+
+  private stopRig() {
+    this.rigHome = { x: this.rigMover.x, z: this.rigMover.z, yaw: this.rigMover.yaw };
+  }
+
+  /** Draw the truck at the rig's position and swing the trailer along behind it. */
+  private poseRig(dt: number, t: number, running: boolean) {
+    const m = this.rigMover;
+    const { root, body } = this.truck;
+    root.position.set(m.x, 0, m.z);
+    root.rotation.y = m.yaw;
+    body.position.y = running ? Math.sin(t * 42) * 0.006 : 0;
+    body.rotation.x = m.leanX;
+    body.rotation.z = m.leanZ;
+    const fwd = m.vx * Math.sin(m.yaw) + m.vz * Math.cos(m.yaw);
+    for (const w of this.truck.wheels) w.rotation.x += (fwd * dt) / 0.5;
+    // the tow ball in world space
+    const hx = m.x - Math.sin(m.yaw) * 3.2, hz = m.z - Math.cos(m.yaw) * 3.2;
+    // a rigid drawbar: the trailer always sits DRAW m behind the ball, swinging on its own heading.
+    // Its yaw lags toward "pointing at the ball", which is the swing you see in the mirror.
+    const DRAW = 2.4;
+    if (this.mounted === 'rig') {
+      const want = Math.atan2(hx - this.trailer.x, hz - this.trailer.z);
+      this.trailer.yaw = lerpAngle(this.trailer.yaw, want, Math.min(1, dt * 7));
+    }
+    const tOldX = this.trailer.x, tOldZ = this.trailer.z;
+    this.trailer.x = hx - Math.sin(this.trailer.yaw) * DRAW;
+    this.trailer.z = hz - Math.cos(this.trailer.yaw) * DRAW;
+    if (dt > 0) {
+      this.trailer.vx = (this.trailer.x - tOldX) / dt;
+      this.trailer.vz = (this.trailer.z - tOldZ) / dt;
+    }
+    this.trailerModel.root.position.set(this.trailer.x, 0, this.trailer.z);
+    this.trailerModel.root.rotation.y = this.trailer.yaw;
+    // a tool you're carrying is off the rack
+    TOOLS.forEach((t, i) => { const g = this.rackTools[i]; if (g) g.visible = this.tool !== t.id; });
+    const tfwd = this.trailer.vx * Math.sin(this.trailer.yaw) + this.trailer.vz * Math.cos(this.trailer.yaw);
+    for (const w of this.trailerModel.wheels) w.rotation.x += (tfwd * dt) / 0.34;
+    // the spare cans in the bed empty as they're used
+    const full = this.canFuel / Math.max(1, this.fuelMax);
+    this.truck.cans.forEach((c, i) => { c.visible = full > i * 0.35; });
+  }
+
+  /** Pose the rig with no dt, for parking on load. */
+  private poseRigStatic(yaw: number) {
+    const m = this.rigMover;
+    this.truck.root.position.set(m.x, 0, m.z);
+    this.truck.root.rotation.y = yaw;
+    this.trailerModel.root.position.set(this.trailer.x, 0, this.trailer.z);
+    this.trailerModel.root.rotation.y = this.trailer.yaw;
+  }
+
+  /** Can the rig be dropped here? It needs open ground, clear of houses and hedges. */
+  private rigSpotFree(x: number, z: number) {
+    if (x < MIN_X + 4 || x > MAX_X - 4 || z < MIN_Z + 4 || z > MAX_Z - 4) return false;
+    const near = Math.abs(z - streetZ(streetAt(z)));
+    if (near > YARD_ROAD_MAX) return false;
+    const R = 2.6;
+    for (const b of this.world.boxes) {
+      const cx = Math.min(Math.max(x, b.minX), b.maxX), cz = Math.min(Math.max(z, b.minZ), b.maxZ);
+      if (Math.hypot(x - cx, z - cz) < R) return false;
+    }
+    // not on top of a house, driveway hedge or the mower
+    const c = this.cellAt(x, z);
+    if (c >= 0 && this.world.kind[c] === K_BED) return false;
+    return true;
+  }
+
+  /**
+   * The arrow above the player when you're stranded: out of fuel with nothing in the can. It points
+   * at the nearest pump (and to the rig, if that's closer and has fuel).
+   */
+  private updateFuelArrow(dt: number, t: number) {
+    const low = this.fuel / Math.max(1, this.fuelMax) < 0.2;
+    // where you'd actually take the machine: the tank sits in the mower, not in your boots
+    const atPump = this.nearestPump().d < PUMP_R + 1;
+    const show = low && this.canFuel <= 0.5 && !atPump && !this.refueling &&
+      this.phase !== 'title' && this.phase !== 'evening' && this.phase !== 'paused' && this.phase !== 'schedule';
+    this.fuelArrow.visible = show;
+    if (!show) return;
+    const p = this.active;
+    // aim at the nearest pump
+    const { pump } = this.nearestPump();
+    const tx = pump.x, tz = pump.z;
+    const yaw = Math.atan2(tx - p.x, tz - p.z);
+    const bob = Math.sin(t * 2.4) * 0.12;
+    this.fuelArrow.position.set(p.x, 2.9 + bob, p.z);
+    this.fuelArrow.rotation.y = yaw;
+    const pulse = 1 + Math.sin(t * 5) * 0.06;
+    this.fuelArrow.scale.setScalar(pulse);
+    void dt;
+  }
+
+  // ---------------------------------------------------------------- tutorial
+  /** A short guided tour on a new game: one card at a time, dismissed with the action it teaches. */
+  private showTutorial(idx: number) {
+    if (!this.tutorialOn) return;
+    this.tutorialStep = idx;
+    this.tutT = 0;
+    const steps = TUTORIAL_STEPS;
+    if (idx >= steps.length) { this.endTutorial(); return; }
+    const s = steps[idx];
+    this.hud.tutorial({
+      step: idx, total: steps.length, icon: s.icon, title: s.title, body: s.body, keys: s.keys,
+      onNext: () => this.advanceTutorial(),
+      onSkip: () => this.endTutorial(true),
+    });
+  }
+
+  private advanceTutorial() {
+    if (this.tutorialStep + 1 >= TUTORIAL_STEPS.length) { this.endTutorial(); return; }
+    this.showTutorial(this.tutorialStep + 1);
+  }
+
+  private endTutorial(skipped = false) {
+    if (!this.tutorialOn) return;
+    this.tutorialOn = false;
+    this.tutorialDone = true;
+    this.hud.hideTutorial();
+    this.hud.toast(skipped ? 'Tutorial skipped. Press ? in the pause menu to see the controls.' : '🎓 That\'s everything you need. Go get some customers!', skipped ? 'info' : 'good', 3400);
+    this.save();
+  }
+
+  /** Called from gameplay to move past a tutorial card without needing the Next button. */
+  private tutorialFire(what: string) {
+    if (!this.tutorialOn) return;
+    const step = TUTORIAL_STEPS[this.tutorialStep];
+    if (step?.done === what) this.advanceTutorial();
+  }
+
+  /** If the player never presses the button, a card still moves on after a while of playing. */
+  private tutorialTick(dt: number) {
+    if (!this.tutorialOn) return;
+    if (this.hud.overlayOpen) return;
+    this.tutT += dt;
+    if (this.tutT > 18) this.advanceTutorial();
+  }
 
   // ================================================================ save
   private save() {
+    try { localStorage.removeItem('li_save_v2'); localStorage.removeItem('li_save_v3'); } catch { /* storage blocked */ }
     const s: SaveFile = {
-      v: 2, money: this.money, rep: this.rep, day: this.day, fuel: this.fuel, up: this.up,
+      v: 4, money: this.money, rep: this.rep, day: this.day, fuel: this.fuel, up: this.up,
+      rigHome: this.rigHome, mowerLoaded: this.mowerLoaded, tool: this.tool, toolFuel: this.toolFuel,
+      tutDone: this.tutorialDone,
       crew: this.crew.length, streets: this.world.streets.filter((x) => x.unlocked).length,
       forecast: this.forecast, week: this.week, hedges: this.world.hedges.map((h) => (h.shaggy ? 0 : h.regrow)),
+      can: this.canFuel / Math.max(1, this.fuelMax),
       lots: this.lots.map((l) => ({
         status: l.status === 'job' || l.status === 'declined' ? 'prospect' : l.status,
         grumpy: l.grumpy, pay: l.pay, days: l.days, services: l.services, strikes: l.strikes, good: l.good, rivalDays: l.rivalDays, level: l.level,
@@ -456,10 +864,24 @@ export class Game {
 
   private readSave(): SaveFile | null {
     try {
-      const s = JSON.parse(localStorage.getItem(SAVE_KEY) ?? 'null') as SaveFile | null;
-      return s && s.v === 2 ? s : null;
+      const key = localStorage.getItem(SAVE_KEY) ? SAVE_KEY : localStorage.getItem('li_save_v3') ? 'li_save_v3' : 'li_save_v2';
+      const raw = JSON.parse(localStorage.getItem(key) ?? 'null') as (SaveFile & { v: number }) | null;
+      if (!raw || (raw.v !== 4 && raw.v !== 3 && raw.v !== 2)) return null;
+      // older saves predate the spare can: top it up
+      if (raw.can === undefined) raw.can = CAN_FRACTION;
+      // and the rig: it starts parked by the pump
+      if (!raw.rigHome) raw.rigHome = { ...RIG_HOME };
+      if (raw.mowerLoaded === undefined) raw.mowerLoaded = false;
+      if (raw.tool === undefined) raw.tool = null;
+      if (raw.toolFuel === undefined) raw.toolFuel = 60;
+      if (raw.tutDone === undefined) raw.tutDone = true;
+      raw.v = 4;
+      return raw;
     } catch { return null; }
   }
+
+  /** The mover you're controlling right now: the rig, the mower, or your feet. */
+  get active() { return this.mounted === 'rig' ? this.rigMover : this.mounted === 'mower' ? this.mover : this.feet; }
 
   // ================================================================ frame
   private frame = (dt: number, t: number) => {
@@ -468,13 +890,61 @@ export class Game {
     switch (this.phase) {
       case 'title': this.updateTitle(dt); break;
       case 'play': this.play(dt, t); break;
-      case 'dialog': this.mover.vx *= 0.8; this.mover.vz *= 0.8; this.cam.update(dt, this.mover.x, this.mover.z); break;
+      case 'dialog': { const a = this.active; a.vx *= 0.8; a.vz *= 0.8; this.cam.update(dt, a.x, a.z); break; }
       case 'tow': this.updateTow(dt); break;
       default: break;
     }
     if (live) this.squash.update(dt);
-    poseBody(this.model.root, this.model.body, this.mover, this.squash);
-    animateMower(this.model, this.mover.yaw, this.mover.vx, this.mover.vz, dt, t, live && this.phase !== 'tow');
+    const running = live && this.phase !== 'tow';
+    // the mower: driven, parked, or strapped to the trailer. The seat is only occupied when you're
+    // in it (and obviously never when the mower is shut away on the trailer).
+    this.model.driver.visible = this.mounted === 'mower' && !this.mowerLoaded;
+    if (this.mowerLoaded) {
+      // strapped across the trailer deck, wheels turned in
+      this.model.root.visible = this.trailerModel.root.visible;
+      this.model.driver.visible = false;
+      this.model.root.position.set(this.trailer.x, 0.6, this.trailer.z);
+      this.model.root.rotation.y = this.trailer.yaw + Math.PI / 2;
+      this.model.body.position.y = 0;
+      this.model.body.rotation.set(0, 0, 0);
+      if (this.blades) this.model.blade.rotation.y += dt * 6;
+    } else if (this.loading > 0 && this.loadKind === 'load') {
+      // sliding up the ramps onto the deck
+      const k = 1 - this.loading / LOAD_TIME;
+      const from = this.mowerPark, to = { x: this.trailer.x, z: this.trailer.z };
+      this.model.root.visible = true;
+      this.model.root.position.set(from.x + (to.x - from.x) * k, 0.6 * Math.max(0, k - 0.55) / 0.45, from.z + (to.z - from.z) * k);
+      this.model.root.rotation.y = this.mowerPark.yaw + (this.trailer.yaw + Math.PI / 2 - this.mowerPark.yaw) * k;
+      this.model.body.position.y = 0;
+    } else if (this.mounted === 'mower') {
+      this.model.root.visible = true;
+      poseBody(this.model.root, this.model.body, this.mover, this.squash);
+      animateMower(this.model, this.mover.yaw, this.mover.vx, this.mover.vz, dt, t, running, this.blades);
+    } else {
+      this.model.root.visible = true;
+      this.model.root.position.set(this.mowerPark.x, 0, this.mowerPark.z);
+      this.model.root.rotation.y = this.mowerPark.yaw;
+      this.model.body.position.y = 0;
+      if (this.blades && live) this.model.blade.rotation.y += dt * 6;
+      const lamp = this.model.bladeLamp.material as THREE.MeshStandardMaterial;
+      lamp.color.set(this.blades ? '#7dff9a' : '#5a2b2b');
+      lamp.emissive.set(this.blades ? '#7dff9a' : '#3a1414');
+      lamp.emissiveIntensity = this.blades ? 0.8 : 0.3;
+    }
+    // the rig: driven with the trailer trailing behind, or sitting parked at the yard
+    this.poseRig(dt, t, running);
+    // the walker
+    {
+      const w = this.walker;
+      const onFoot = this.mounted === null;
+      w.root.visible = onFoot;
+      if (onFoot) {
+        poseBody(w.root, w.body, this.feet, this.squash);
+        animateWalker(w, dt, this.feet.speed, this.phase === 'play', t);
+        // carrying something keeps that arm up out of the walk cycle
+        if (this.tool) this.poseTool(dt, t);
+      } else if (this.toolModel) this.toolModel.root.visible = false;
+    }
     if (this.phase !== 'play') {
       for (const c of this.crew) c.npc.update(0, this.world, t);
       this.rival.npc.update(0, this.world, t);
@@ -484,9 +954,20 @@ export class Game {
     this.updateMarkers(t);
     this.updateFades(dt);
     this.updateLighting();
-    this.leaves.update(dt, t, this.wx.wind);
+    this.updateSky(dt);
+    this.leaves.update(dt, t, this.wx.wind, this.onLeafLand);
+    if (this.phase === 'play') this.refillCanAtPump(dt);
+    this.canModel.visible = this.canFuel > 0.02;
+    if (this.canModel.visible) {
+      if (this.mounted === 'mower') { this.canModel.position.set(this.mover.x + 0.62, 0.72, this.mover.z - 0.4); this.canModel.rotation.y = this.mover.yaw; }
+      else if (this.mounted === 'rig') { this.canModel.visible = false; }
+      else { this.canModel.position.set(this.feet.x - 0.24, 0.35, this.feet.z); this.canModel.rotation.y = this.feet.yaw + Math.PI; }
+    }
+    this.updateFuelArrow(dt, t);
     this.clips.update(dt, this.mover.x, 0.4, this.mover.z);
     this.sparks.update(dt, this.mover.x, 0.4, this.mover.z);
+    this.smoke.update(dt, this.mover.x, 0.9, this.mover.z);
+    this.exhaustPuffs(dt);
     this.popups.update(dt, this.engine.camera);
     this.texT -= dt;
     if (this.texT <= 0) { this.texT = 0.1; this.grass.flush(); }
@@ -494,6 +975,15 @@ export class Game {
     if (this.hudT <= 0 && live) { this.hudT = 0.1; this.pushHud(); }
     this.mapT -= dt;
     if (this.mapT <= 0) { this.mapT = 0.2; this.drawMinimap(); }
+  };
+
+  /** A leaf just landed: a tiny puff of dust where it settles. */
+  private onLeafLand = (l: Leaf) => {
+    if (Math.random() < 0.25) this.clips.spawn(l.x, 0.06, l.z, (Math.random() - 0.5) * 0.8, 0.4, (Math.random() - 0.5) * 0.8, 0.55, 0.35, 0.16, 0.06, 0.35, 9);
+    // a leaf that settles in someone's yard belongs to that yard now
+    const c = this.cellAt(l.x, l.z);
+    const o = c >= 0 ? this.world.owner[c] : -1;
+    if (o >= 0 && this.open(this.world.lots[o])) l.lot = o;
   };
 
   private updateTitle(dt: number) {
@@ -504,28 +994,63 @@ export class Game {
     cam.lookAt(44, 0, 0);
   }
 
+  /**
+   * Keys are screen-relative: "up" always means away from the camera. The stick is turned by the
+   * camera's yaw each frame, so the chase view and a hand-orbited view both steer true.
+   */
+  private stick() {
+    const raw = this.controls.read();
+    if (raw.m < 0.02) return { ...raw, x: 0, z: 0 };
+    const c = Math.cos(this.cam.angle), s = Math.sin(this.cam.angle);
+    return { ...raw, x: raw.x * c + raw.z * s, z: -raw.x * s + raw.z * c };
+  }
+
   private play(dt: number, t: number) {
     this.hour += dt / SEC_PER_HOUR;
     if (this.hour >= DAY_END) { this.hour = DAY_END; this.endDay(); return; }
 
-    const inp = this.controls.read();
-    this.boost = inp.boost && inp.m > 0.1;
-    const m = this.mover;
+    const inp = this.stick();
+    const m = this.active;
+    this.boost = this.mounted === 'mower' && inp.boost && inp.m > 0.1;
     // rain makes the grass slick: slower to grip, slower to stop (better tyres help)
-    const grip = this.today === 'rain' ? 0.42 + 0.17 * this.up.tires : 1;
-    m.o.maxSpeed = this.speedMax;
-    m.o.accel = 10 * grip;
-    m.o.decel = 7 * grip;
-    m.o.turnRate = 10 * (0.55 + 0.45 * grip);
-    const hit = m.update(dt, inp.x, inp.z, inp.m, this.world, this.boost ? 1.35 : 1);
+    const grip = this.mounted === 'mower' && this.today === 'rain' ? 0.42 + 0.17 * this.up.tires : this.mounted === 'rig' && this.today === 'rain' ? 0.6 + 0.13 * this.up.tires : 1;
+    if (this.mounted === 'mower') {
+      m.o.maxSpeed = this.speedMax;
+      m.o.accel = 10 * grip;
+      m.o.decel = 7 * grip;
+      m.o.turnRate = 10 * (0.55 + 0.45 * grip);
+    } else if (this.mounted === 'rig') {
+      m.o.maxSpeed = RIG_SPEED;
+      m.o.accel = 7 * grip;
+      m.o.decel = 5.2 * grip;
+      m.o.turnRate = 5.5 * (0.7 + 0.3 * grip);
+    }
+    // the mower is out of fuel; the rig is out of fuel with an empty can
+    const dry = this.mounted !== null && this.fuel <= 0;
+    const hit = m.update(dt, dry ? 0 : inp.x, dry ? 0 : inp.z, dry ? 0 : inp.m, this.world, this.boost ? 1.35 : 1);
     this.bumpCd -= dt;
     if (hit.impact > 2.4 && this.bumpCd <= 0) this.bump(hit.impact, hit.nx, hit.nz);
-    const frac = Math.min(1, m.speed / this.speedMax);
+    const maxSp = this.mounted === 'rig' ? RIG_SPEED : this.mounted === 'mower' ? this.speedMax : this.feet.o.maxSpeed;
+    const frac = Math.min(1, m.speed / maxSp);
 
-    const cutNow = this.cutAround(dt);
-    this.squashFlowers();
-    this.vacuumLeaves(dt);
-    this.trimHedges();
+    let cutNow = 0;
+    if (this.mounted === 'mower') {
+      cutNow = this.blades && !dry ? this.cutAround(dt) : this.idleDeck(dt);
+      if (this.blades && !dry) this.deckBlast(dt); else this.pushLeaves(dt);
+      this.squashFlowers();
+      this.vacuumLeaves(dt);
+      if (this.blades) this.trimHedges();
+    } else if (this.mounted === 'rig') {
+      // the rig is just transport: bump leaves about, don't cut anything
+      if (m.speed > 0.4) this.pushLeaves(dt);
+    } else {
+      this.walkAbout(dt);
+      this.toolTankTopUp(dt);
+      this.trailerPrompt();
+      // a hand tool only runs while you hold it up to the work
+      if (this.controls.has('tool')) this.useTool(dt); else this.toolActive = false;
+    }
+    this.loadUpdate(dt);
     this.updateNpcs(dt, t);
     this.updateFuel(dt, frac, cutNow);
     if (this.phase !== 'play') return;
@@ -535,9 +1060,451 @@ export class Game {
     this.checkKnock();
     this.checkT -= dt;
     if (this.checkT <= 0) { this.checkT = 0.2; this.checkJobs(); }
+    this.tutorialTick(dt);
 
-    this.sfx.drone(0.45 + frac * 0.4 + Math.min(0.3, cutNow * 0.05), frac * (this.boost ? 1.3 : 1) + Math.min(0.5, cutNow * 0.06));
+    if (this.mounted !== null && m.speed > 2) this.tutorialFire('drive');
+    if (this.mounted === 'mower') this.sfx.drone(0.45 + frac * 0.4 + Math.min(0.3, cutNow * 0.05), frac * (this.boost ? 1.3 : 1) + Math.min(0.5, cutNow * 0.06));
+    else if (this.mounted === 'rig') this.sfx.drone(0.3 + frac * 0.35, frac * 1.1);
+    else this.sfx.drone(0, 0);
+
+    // The view is camera-relative driving's reference, so it must never turn while you drive: a view
+    // that chases your heading makes "up" mean something new every frame, and a held turn spirals
+    // (that was the "controls go crazy" bug). So it holds perfectly still while you're moving, and
+    // while you're stopped it slowly settles in behind you — where you can see it happen and where
+    // nothing can feed back into your steering.
+    const atRest = m.speed < 0.6 && inp.m < 0.05 && this.mounted !== null;
+    if (atRest && this.orbitDrag === null && this.phase === 'play') {
+      this.idleT += dt;
+      if (this.idleT > 1.2) this.cam.autoTarget = m.yaw;
+    } else {
+      this.idleT = 0;
+      this.cam.autoTarget = null;
+    }
     this.cam.update(dt, m.x, m.z, m.vx, m.vz, this.boost);
+    // a bigger vehicle wants a wider view: ease into the new distance when you change what you're
+    // driving, then leave the camera alone so a hand-tilted view stays where you put it
+    if (this.camMode !== this.mounted) { this.camMode = this.mounted; this.camEase = 1.4; }
+    if (this.camEase > 0 && this.orbitDrag === null) {
+      this.camEase = Math.max(0, this.camEase - dt);
+      const wantY = this.mounted === 'rig' ? 16.5 : this.mounted === 'mower' ? 13.2 : 8.4;
+      const wantZ = this.mounted === 'rig' ? 9.0 : this.mounted === 'mower' ? 7.0 : 4.9;
+      const o = this.cam.o.offset;
+      o.y += (wantY - o.y) * Math.min(1, dt * 3.5);
+      o.z += (wantZ - o.z) * Math.min(1, dt * 3.5);
+    }
+  }
+
+  // ---------------------------------------------------------------- on foot
+  /** Rough walking: brush the hedges and kick up any leaves you scuff through. */
+  /** A wisp of exhaust from the pipe while the engine runs: grey, drifting up and back. */
+  private exhaustPuffs(dt: number) {
+    const running = this.riding || this.blades;
+    if (!running) return;
+    this.puffT -= dt;
+    if (this.puffT > 0) return;
+    this.puffT = 0.1 + Math.random() * 0.1;
+    const m = this.mover;
+    const p = this.model.pipeTip;
+    // particle space is world space: the mower model sits at the mover's x/z
+    const x = m.x + p.x, y = p.y + 0.25, z = m.z + p.z;
+    const k = this.riding ? 0.5 : 0.75;
+    this.smoke.spawn(x, y, z, (Math.random() - 0.5) * 0.3, 0.55 + Math.random() * 0.35, (Math.random() - 0.5) * 0.3,
+      0.55 * k, 0.55 * k, 0.58 * k, 0.5 + Math.random() * 0.4, 0.55, 0);
+  }
+
+  private walkAbout(dt: number) {
+    const f = this.feet;
+    if (f.speed > 0.6) {
+      this.leaves.gust(f.x, f.z, 0.55, 1.5, 0.7);
+      this.squashFlowers();
+      this.walkT -= dt;
+      if (this.walkT <= 0) { this.walkT = 0.34; this.sfx.walk(Math.min(3, Math.floor(f.speed))); }
+    }
+    // the deck blast: leaves near the parked mower lift and tumble while the blades spin
+    if (this.blades && !this.mowerLoaded) {
+      this.deckT -= dt;
+      if (this.deckT <= 0) { this.deckT = 0.2; this.leaves.gust(this.mowerPark.x, this.mowerPark.z, 1.6, 1.2, 1.6); }
+    }
+    void dt;
+  }
+
+  /** Aim the deck at what is under it without turning the blade: pushes leaves around. */
+  private idleDeck(dt: number) {
+    const m = this.mover;
+    const n = this.leaves.gust(m.x, m.z, 1.5, 0.9, 1.1);
+    if (n > 0 && Math.random() < 0.3) this.sfx.leaf();
+    void dt;
+    return 0;
+  }
+
+  /** With the blades off the deck still shoves leaves along the grass at low speed. */
+  private pushLeaves(dt: number) {
+    const m = this.mover;
+    if (m.speed < 0.3) return;
+    this.deckT -= dt;
+    if (this.deckT > 0) return;
+    this.deckT = 0.12;
+    this.leaves.gust(m.x, m.z, 1.3, 0.5, 1.0);
+  }
+
+  /** Step out of whichever vehicle you're in, onto its left side. */
+  dismount() {
+    if (this.mounted === null || this.phase !== 'play' || this.loading > 0) return;
+    const rig = this.mounted === 'rig';
+    const m = this.active;
+    if (m.speed > (rig ? 2.0 : 1.6)) { this.hud.toast('Slow down before hopping off!', 'bad', 1800); return; }
+    // park it where it stands
+    if (rig) this.stopRig();
+    else {
+      this.mowerPark = { x: m.x, z: m.z, yaw: m.yaw };
+      const wasBlades = this.blades;
+      this.blades = false;
+      if (wasBlades) {
+        this.sfx.blade(false);
+        this.hud.toast('🛑 Blades stopped so it is safe to walk around. Press B when you are back on.', 'info', 3600);
+      }
+      this.tutorialFire('blades');
+    }
+    // Step out beside the machine. The mower is a collider, so let the walker settle against it and
+    // accept whichever side actually gets you clear of it — the old check only asked whether you had
+    // moved away from the seat point, which passed while you were still standing inside the mower.
+    const rx = Math.cos(m.yaw), rz = -Math.sin(m.yaw);
+    const R = m.o.radius + this.feet.o.radius + 0.25;
+    const seat = rig ? this.rigMover : this.mover;
+    this.mounted = null;
+    const need = m.o.radius + this.feet.o.radius * 0.9;
+    const spots: [number, number][] = [[rx * R, rz * R], [-rx * R, -rz * R], [rx * R * 1.7, rz * R * 1.7], [-rx * R * 1.7, -rz * R * 1.7], [0, -R * 2]];
+    let placed = false;
+    for (const [dx, dz] of spots) {
+      this.feet.place(seat.x + dx, seat.z + dz, seat.yaw);
+      this.feet.collide(this.world);
+      if (Math.hypot(this.feet.x - seat.x, this.feet.z - seat.z) >= need) { placed = true; break; }
+    }
+    if (!placed) {
+      // nowhere clear: step out anyway, as far from the machine as the free side allows
+      let best = { x: seat.x + rx * R, z: seat.z + rz * R }, bestD = -1;
+      for (const [dx, dz] of spots) {
+        this.feet.place(seat.x + dx, seat.z + dz, seat.yaw);
+        this.feet.collide(this.world);
+        const d = Math.hypot(this.feet.x - seat.x, this.feet.z - seat.z);
+        if (d > bestD) { bestD = d; best = { x: this.feet.x, z: this.feet.z }; }
+      }
+      this.feet.place(best.x, best.z, seat.yaw);
+    }
+    this.squash.reset();
+    this.squash.jump(2.6);
+    this.sfx.dismount();
+    this.cam.snap(this.feet.x, this.feet.z, this.feet.yaw);
+    this.popups.spawn('on foot', seat.x, 1.6, seat.z, '#e8f4ff', 0.9, 0.8);
+    if (!this.walkHinted) {
+      this.walkHinted = true;
+      this.hud.toast('🚶 On foot. Walk up to a door and knock, or over to the trailer to swap equipment. E climbs back in.', 'info', 4600);
+    }
+    this.tutorialFire('walk');
+  }
+
+  /** Climb into whichever of the two vehicles is nearest (and close enough). */
+  mount() {
+    if (this.mounted !== null || this.phase !== 'play' || this.loading > 0) return;
+    const f = this.feet;
+    const rigD = Math.hypot(f.x - this.rigMover.x, f.z - this.rigMover.z);
+    const mowerD = this.mowerLoaded ? Infinity : Math.hypot(f.x - this.mowerPark.x, f.z - this.mowerPark.z);
+    const rigR = this.rigMover.o.radius + 1.6, mowerR = this.mover.o.radius + 1.4;
+    const canRig = rigD < rigR, canMower = mowerD < mowerR;
+    if (!canRig && !canMower) {
+      if (this.mowerLoaded) this.hud.toast('Walk over to the truck (or roll the mower off the trailer) and press E.', 'info', 2200);
+      else this.hud.toast('Walk over to the mower or the truck and press E to climb in.', 'info', 2000);
+      return;
+    }
+    const useRig = canRig && (!canMower || rigD <= mowerD);
+    this.squash.reset();
+    this.squash.jump(2.2);
+    this.sfx.mount();
+    if (useRig) {
+      this.mounted = 'rig';
+      // drop the trailer behind wherever the truck was left
+      this.startRig();
+      this.cam.snap(this.rigMover.x, this.rigMover.z, this.rigMover.yaw);
+      this.tutorialFire('rig');
+    } else {
+      this.mounted = 'mower';
+      this.mover.place(this.mowerPark.x, this.mowerPark.z, this.mowerPark.yaw);
+      this.cam.snap(this.mover.x, this.mover.z, this.mover.yaw);
+      this.tutorialFire('mower');
+    }
+  }
+
+  /** Roll the mower off the trailer so you can drive it. */
+  openRig() {
+    if (this.phase !== 'play') return;
+    // on foot you can still work the ramps, as long as you're at the trailer
+    if (this.mounted === null) {
+      const near = Math.min(
+        Math.hypot(this.feet.x - this.trailer.x, this.feet.z - this.trailer.z),
+        Math.hypot(this.feet.x - this.rigMover.x, this.feet.z - this.rigMover.z),
+      );
+      if (near > 7) { this.hud.toast('Walk over to the trailer to drop the ramps.', 'info', 1800); return; }
+      this.rigMover.vx = this.rigMover.vz = 0;
+    } else if (this.mounted !== 'rig') {
+      this.hud.toast('Get off the mower first (E), then head for the trailer.', 'info', 2000);
+      return;
+    }
+    const m = this.rigMover;
+    if (m.speed > 0.4) { this.hud.toast('Stop the truck before dropping the ramps.', 'info', 1800); return; }
+    if (!this.mowerLoaded) { this.hud.toast('The mower is already off the trailer.', 'info', 1600); return; }
+    if (this.loading > 0) return;
+    // there has to be somewhere for the mower to land: the back of the trailer, clear of walls
+    const bx = this.trailer.x - Math.sin(this.trailer.yaw) * 2.6;
+    const bz = this.trailer.z - Math.cos(this.trailer.yaw) * 2.6;
+    if (!this.rigSpotFree(bx, bz)) {
+      this.hud.toast('No room behind the trailer — swing it out into open ground first.', 'bad', 2600);
+      return;
+    }
+    this.loading = LOAD_TIME;
+    this.loadKind = 'unload';
+    this.sfx.mount();
+    this.hud.toast('🪜 Dropping the ramps…', 'info', 1400);
+  }
+
+  /** Drag the mower back onto the trailer with the winch. */
+  private loadMower() {
+    if (this.mounted === null || this.loading > 0) return;
+    const near = this.mowerLoaded
+      ? Infinity
+      : Math.min(
+        Math.hypot(this.feet.x - this.mowerPark.x, this.feet.z - this.mowerPark.z),
+        Math.hypot(this.rigMover.x - this.mowerPark.x, this.rigMover.z - this.mowerPark.z),
+      );
+    if (near > RIG_RANGE) { this.hud.toast('Bring the rig closer to the mower, or drive it nearer. (L)', 'info', 2200); return; }
+    this.loading = LOAD_TIME;
+    this.loadKind = 'load';
+    this.sfx.mount();
+    this.hud.toast('🪝 Winching the mower on…', 'info', 1400);
+  }
+
+  /** Finish a winch cycle: the mower ends up on the trailer, or rolled off its ramps. */
+  private loadUpdate(dt: number) {
+    if (this.loading <= 0) return;
+    this.loading -= dt;
+    // a little dust and a clank from the ramps
+    if (Math.random() < 0.4) {
+      const p = this.loadKind === 'load' ? this.mowerPark : this.trailer;
+      this.clips.spawn(p.x + (Math.random() - 0.5) * 2, 0.1, p.z + (Math.random() - 0.5) * 2, 0, 0.6, 0, 0.6, 0.55, 0.45, 0.08, 0.5, 9);
+    }
+    if (this.loading > 0) return;
+    if (this.loadKind === 'load') {
+      this.mowerLoaded = true;
+      this.mounted = 'rig';
+      this.sfx.cash();
+      this.hud.toast('🚜 Mower loaded. Drive the rig to the next yard.', 'good', 3000);
+      this.tutorialFire('load');
+    } else {
+      this.mowerLoaded = false;
+      // roll it off the back of the trailer, facing away
+      const bx = this.trailer.x - Math.sin(this.trailer.yaw) * 2.6;
+      const bz = this.trailer.z - Math.cos(this.trailer.yaw) * 2.6;
+      this.mowerPark = { x: bx, z: bz, yaw: this.trailer.yaw };
+      this.mover.place(bx, bz, this.trailer.yaw);
+      this.mounted = 'mower';
+      this.blades = false;
+      this.sfx.dismount();
+      this.hud.toast('🚜 Mower is down the ramps. Press B to spin the blades up.', 'good', 3000);
+      this.cam.snap(bx, bz, this.trailer.yaw);
+    }
+  }
+
+  /** The trailer menu: swap the hand tool, or drop the mower off / winch it back on. */
+  openTrailer() {
+    if (this.phase !== 'play') return;
+    if (this.mounted !== null) { this.hud.toast('Hop out (E) to get at the equipment on the trailer.', 'info', 2000); return; }
+    const near = Math.min(
+      Math.hypot(this.feet.x - this.trailer.x, this.feet.z - this.trailer.z),
+      Math.hypot(this.feet.x - this.rigMover.x, this.feet.z - this.rigMover.z),
+    );
+    if (near > 7) { this.hud.toast('Walk over to the trailer to swap equipment (T).', 'info', 2000); return; }
+    const none = this.tool === null;
+    const opts: DialogOption[] = TOOLS.map((t, i) => ({
+      label: `${t.icon} ${t.name}`, sub: `${t.desc} · ${this.tool === t.id ? 'in hand' : 'take'}`, key: String(i + 1),
+      primary: this.tool !== t.id,
+      onPick: () => { this.pickTool(this.tool === t.id ? null : t.id); },
+    }));
+    opts.push({
+      label: none ? '🧤 Nothing' : '🧤 Put everything down',
+      sub: 'walk and knock hands-free', key: '0', onPick: () => this.pickTool(null),
+    });
+    opts.push({
+      label: this.mowerLoaded ? '🚜 Roll the mower off' : '🪝 Winch the mower on',
+      sub: this.mowerLoaded ? 'drive it off the ramps' : `needs you within ${RIG_RANGE} m`, key: 'L', onPick: () => {
+        this.hud.close(); this.phase = 'play';
+        if (this.mowerLoaded) this.openRig(); else this.loadMower();
+      },
+    });
+    opts.push({ label: 'Done', key: 'Esc', onPick: () => this.closeDialog() });
+    const rows = TOOLS.map((t) => {
+      const has = this.tool === t.id;
+      return `<div class="tool-row${has ? ' on' : ''}"><span>${t.icon}</span><b>${t.name}</b><small>${t.desc}</small>${has ? '<em>in hand</em>' : ''}</div>`;
+    }).join('');
+    const body = `<b>Equipment trailer</b> — take one hand tool and carry it while you walk. Tools run off their own little tank, not the mower's.` +
+      `<div class="tools">${rows}</div>` +
+      `<div class="fuel-note">⛽ Tool tank: ${Math.ceil((this.toolFuel / this.toolFuelMax) * 100)}% · refills when you're at the trailer.</div>`;
+    this.hud.dialog('🧰 Trailer', body, opts);
+    this.phase = 'dialog';
+    this.sfx.unlock();
+  }
+
+  /** Standing by the trailer tops the little tank up, so a swap never leaves you dry. */
+  private toolTankTopUp(dt: number) {
+    if (this.toolFuel >= this.toolFuelMax) return;
+    const near = Math.hypot(this.feet.x - this.trailer.x, this.feet.z - this.trailer.z);
+    if (near > 7) return;
+    this.toolFuel = Math.min(this.toolFuelMax, this.toolFuel + (this.toolFuelMax / 8) * dt);
+  }
+
+  /** Take a tool in hand (or put it away). */
+  private pickTool(id: ToolId | null, quiet = false) {
+    this.tool = id;
+    // take the old tool off the hand itself: removing it from the scene would leave it parented to
+    // the arm, so every swap stacked another model on the walker's hand
+    if (this.toolModel) {
+      this.toolModel.root.parent?.remove(this.toolModel.root);
+      this.toolModel = null;
+    }
+    this.toolActive = false;
+    if (!id) { this.walker.armR.rotation.set(0, 0, -0.08); }
+    if (id) {
+      // a tool handed to you always comes with a usable tank
+      if (this.toolFuel <= 1) this.toolFuel = this.toolFuelMax;
+      this.toolModel = buildTool(id);
+      const arm = this.walker.armR;
+      arm.add(this.toolModel.root);
+      // out in front of the hand and tilted away from the body, so the model reads at a glance
+      this.toolModel.root.position.set(-0.16, -0.48, 0.22);
+      this.toolModel.root.rotation.set(-0.5, 0.5, 0.18);
+      this.sfx.mount();
+      if (!quiet) this.hud.toast(`${toolDef(id).icon} ${toolDef(id).name} in hand · ${toolDef(id).desc}`, 'good', 3200);
+    } else if (!quiet) this.sfx.dismount();
+    if (this.hud.overlayOpen) this.closeDialog();
+  }
+
+  get toolFuelMax() { return 60; }
+
+  /** Hold a tool toward what you're working on; it does its one job in reach. */
+  private useTool(dt: number) {
+    const t = this.tool;
+    if (!t || this.toolFuel <= 0) { this.toolActive = false; return; }
+    const def = toolDef(t);
+    this.tutorialFire('tool');
+    const f = this.feet;
+    this.toolFuel = Math.max(0, this.toolFuel - TOOL_BURN * dt);
+    this.toolActive = true;
+    if (def.action === 'leaves') {
+      const n = this.leaves.gust(f.x + Math.sin(f.yaw) * 1.2, f.z + Math.cos(f.yaw) * 1.2, def.reach, 2.2, 3.2);
+      if (n > 0 && Math.random() < 0.25) this.sfx.leaf();
+      this.leafT -= dt;
+      if (this.leafT <= 0) { this.leafT = 2.6; this.sfx.leaf(); }
+      return;
+    }
+    if (def.action === 'hedge') {
+      for (const h of this.world.hedges) {
+        if (!h.shaggy) continue;
+        const b = h.box;
+        const cx = clamp(f.x, b.minX, b.maxX), cz = clamp(f.z, b.minZ, b.maxZ);
+        if (Math.hypot(f.x - cx, f.z - cz) > def.reach) continue;
+        this.trim(h, true);
+      }
+      return;
+    }
+    // weed eater: brush the edges where grass creeps over the paving
+    this.edgeCut(dt, def.reach);
+  }
+
+  /** Cut edge cells around (x, z) — only cells whose lot actually booked edging. */
+  private edgeCut(dt: number, R: number) {
+    const f = this.feet;
+    const g0x = Math.floor((f.x - R - MIN_X) / CELL), g1x = Math.floor((f.x + R - MIN_X) / CELL);
+    const g0z = Math.floor((f.z - R - MIN_Z) / CELL), g1z = Math.floor((f.z + R - MIN_Z) / CELL);
+    let n = 0;
+    for (let gz = Math.max(0, g0z); gz <= Math.min(GH - 1, g1z); gz++) for (let gx = Math.max(0, g0x); gx <= Math.min(GW - 1, g1x); gx++) {
+      const c = gz * GW + gx;
+      const owner = this.world.owner[c];
+      if (owner < 0 || !this.world.edge[c] || this.grass.isCut(c)) continue;
+      if (Math.hypot(cellX(c) - f.x, cellZ(c) - f.z) > R) continue;
+      if (this.grass.cutCell(c, (Math.floor(cellX(c)) & 1) === 0) === 'edge') { this.lots[owner].edgeCut++; n++; }
+    }
+    if (n > 0) {
+      const fx = Math.sin(f.yaw), fz = Math.cos(f.yaw);
+      for (let k = 0; k < Math.min(4, n * 2); k++) {
+        this.clips.spawn(f.x + fx * 0.6, 0.25, f.z + fz * 0.6, (Math.random() - 0.5) * 2.5, 1.6 + Math.random() * 2, (Math.random() - 0.5) * 2.5, 0.36, 0.62, 0.22, 0.08, 0.8, 9);
+      }
+      this.toolT -= dt;
+      if (this.toolT <= 0) { this.toolT = 0.09; this.sfx.chop(0.6); }
+    }
+  }
+
+  /** Put the tool in the walker's hand and spin/shake the working part. */
+  private poseTool(dt: number, t: number) {
+    const tm = this.toolModel;
+    if (!tm) return;
+    tm.root.visible = true;
+    const on = this.toolActive && this.toolFuel > 0;
+    // the arm carries the tool: raised and steady when it runs, hanging low when it's off
+    const arm = this.walker.armR;
+    arm.rotation.x = -0.9 + (on ? 0 : 0.25);
+    arm.rotation.z = -0.32;
+    // an empty tank sputters instead of spinning: tell the player why nothing is happening
+    if (this.toolActive && !on && this.toolFuel <= 0) {
+      this.toolT -= dt;
+      if (this.toolT <= 0) {
+        this.toolT = 1.6;
+        this.sfx.sputter();
+        this.hud.toast('🛢️ That tool is out of fuel — top it up at the trailer.', 'bad', 2400);
+      }
+    }
+    if (this.tool === 'blower') {
+      tm.root.rotation.x = -0.55;
+      if (on) tm.run.rotation.z += dt * 40;
+      // dust blown out of the nozzle
+      if (on && Math.random() < 0.5) {
+        const f = this.feet;
+        this.clips.spawn(f.x + Math.sin(f.yaw) * 1.1, 0.3, f.z + Math.cos(f.yaw) * 1.1, Math.sin(f.yaw) * 3, 1.1, Math.cos(f.yaw) * 3, 0.7, 0.62, 0.4, 0.24, 0.4, 9);
+      }
+    } else if (this.tool === 'weedeater') {
+      tm.root.rotation.x = -0.25 + Math.sin(t * 3) * 0.03;
+      if (on) { tm.run.rotation.y += dt * 30; tm.root.position.x = Math.sin(t * 60) * 0.01; }
+      if (on && Math.random() < 0.3) {
+        const f = this.feet;
+        this.clips.spawn(f.x + Math.sin(f.yaw) * 0.7, 0.15, f.z + Math.cos(f.yaw) * 0.7, (Math.random() - 0.5) * 2, 1.5, (Math.random() - 0.5) * 2, 0.4, 0.7, 0.3, 0.07, 0.55, 9);
+      }
+    } else if (this.tool === 'trimmer') {
+      tm.root.rotation.x = -0.1 + Math.sin(t * 8) * 0.02;
+      if (on) tm.run.rotation.y = Math.sin(t * 40) * 0.12;
+    }
+  }
+
+  /** Leaving the mower also means it can't cut: that's the trade for saving fuel. */
+  private toggleBlades() {
+    this.blades = !this.blades;
+    this.tutorialFire('blades');
+    this.sfx.blade(this.blades);
+    if (this.blades) {
+      this.popups.spawn('BLADES ON', this.mover.x, 1.9, this.mover.z, '#9dffb0', 0.9, 0.9);
+    } else {
+      this.popups.spawn('BLADES OFF', this.mover.x, 1.9, this.mover.z, '#ffd23a', 0.9, 0.9);
+      if (!this.bladeHinted) {
+        this.bladeHinted = true;
+        this.hud.toast('🛑 Blades off: no cutting, but the engine burns less fuel. Press B to spin them up again.', 'info', 4200);
+      }
+    }
+  }
+
+  /** A gentle prompt when you wander up to the trailer on foot. */
+  private trailerPrompt() {
+    const near = Math.hypot(this.feet.x - this.trailer.x, this.feet.z - this.trailer.z) < 3.4 ||
+      Math.hypot(this.feet.x - this.rigMover.x, this.feet.z - this.rigMover.z) < 3.6;
+    if (!near) { this.trailerHinted = false; return; }
+    if (this.trailerHinted) return;
+    this.trailerHinted = true;
+    this.hud.toast('🧰 Press T to take a tool from the trailer', 'info', 2600);
   }
 
   private cellAt(x: number, z: number) {
@@ -563,6 +1530,17 @@ export class Game {
     return n;
   }
 
+  /** The spinning deck throws nearby leaves into the air; they tumble and land somewhere new. */
+  private deckBlast(dt: number) {
+    const m = this.mover;
+    if (m.speed < 0.4) return;
+    this.deckT -= dt;
+    if (this.deckT > 0) return;
+    this.deckT = 0.07;
+    const n = this.leaves.gust(m.x, m.z, 2.1, 4.2 + m.speed * 0.5, 3.0 + m.speed * 0.45);
+    if (n > 0) this.sfx.leaf();
+  }
+
   private cutAround(dt: number) {
     const m = this.mover;
     const fx = Math.sin(m.yaw), fz = Math.cos(m.yaw);
@@ -583,7 +1561,7 @@ export class Game {
   }
 
   private squashFlowers() {
-    const m = this.mover;
+    const m = this.active;
     for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
       const c = this.cellAt(m.x + dx * 0.55, m.z + dz * 0.55);
       if (c < 0 || this.world.kind[c] !== K_BED) continue;
@@ -653,7 +1631,7 @@ export class Game {
     }
     this.npcStep(this.rival.npc, dt, t);
     // nobody drives through anybody
-    const all = [this.mover, ...this.crew.map((c) => c.npc.mover), this.rival.npc.mover];
+    const all = [this.active, ...this.crew.map((c) => c.npc.mover), this.rival.npc.mover];
     this.npcBumpCd -= dt;
     for (let a = 0; a < all.length; a++) for (let b = a + 1; b < all.length; b++) {
       const imp = separate(all[a], all[b]);
@@ -753,19 +1731,48 @@ export class Game {
   }
 
   // ---------------------------------------------------------------- fuel
+  /**
+   * The machine whose tank you're filling. On foot that's the mower (or the rig if the mower is
+   * strapped to it) — not wherever you happen to be standing.
+   */
+  private fuelAnchor() {
+    if (this.mounted === 'rig') return this.rigMover;
+    if (this.mounted === 'mower') return this.mover;
+    return this.mowerLoaded ? this.rigMover : this.mowerPark;
+  }
+
   private nearestPump() {
     let best = this.world.streets[0].pump, bd = Infinity;
+    const p = this.fuelAnchor();
     for (const s of this.world.streets) {
       if (!s.unlocked) continue;
-      const d = Math.hypot(this.mover.x - s.pump.x, this.mover.z - s.pump.z);
+      const d = Math.hypot(p.x - s.pump.x, p.z - s.pump.z);
       if (d < bd) { bd = d; best = s.pump; }
     }
     return { pump: best, d: bd };
   }
 
+  /**
+   * Fuel burn. Idling sips, driving costs more, the blades cost extra, and mowing in long grass
+   * costs a little more again. Walking to the door with the mower parked and the blades off is by
+   * far the cheapest way to get around.
+   */
   private updateFuel(dt: number, frac: number, cutNow: number) {
-    this.fuel -= (0.25 + frac * (this.boost ? 1.7 : 0.95) + (cutNow ? 0.3 : 0)) * dt;
+    if (this.mounted === 'rig') {
+      // the truck has a big lazy engine: driving costs a little, idling costs almost nothing
+      this.fuel -= (BURN.rigIdle + frac * (this.boost ? BURN.rigBoost : BURN.rigDrive)) * dt;
+    } else if (this.mounted === 'mower') {
+      let burn = BURN.idle + frac * (this.boost ? BURN.boost : BURN.drive);
+      if (this.blades) burn += BURN.blades + (cutNow ? BURN.cut : 0);
+      this.fuel -= burn * dt;
+    } else if (this.blades) {
+      // parked with the blades spinning: the deck keeps draining
+      this.fuel -= BURN.blades * dt;
+    }
+    this.fuel = Math.max(0, this.fuel);
     this.refueling = false;
+    this.pourUpdate(dt);
+
     const { pump, d } = this.nearestPump();
     if (d < PUMP_R && this.fuel < this.fuelMax - 0.05) {
       if (this.money <= 0.01) {
@@ -782,8 +1789,25 @@ export class Game {
       }
     } else this.pumpHinted = false;
     const f = this.fuel / this.fuelMax;
-    if (f < 0.2 && !this.fuelWarned) { this.fuelWarned = true; this.sfx.deny(); this.hud.toast('⛽ Low on gas! Head to a pump (west end of each street)', 'bad'); }
+    if (f < 0.2 && !this.fuelWarned) {
+      this.fuelWarned = true;
+      this.sfx.deny();
+      if (this.canFuel > 0.5) this.hud.toast('⛽ Low on gas! Park up and press G to pour the spare can in, or head to a pump.', 'bad', 4200);
+      else this.hud.toast('⛽ Low on gas! Head to a pump (west end of each street)', 'bad');
+    }
     if (f > 0.5) this.fuelWarned = false;
+    // a dry tank with a can in the back isn't the end of the day any more
+    if (this.fuel <= 0 && (this.canFuel > 0.5 || this.mounted === null)) {
+      this.fuel = 0;
+      if (!this.canHinted) {
+        this.canHinted = true;
+        this.sfx.sputter();
+        this.sfx.drone(0, 0);
+        this.hud.toast('🛢️ Out of gas — but you have the spare can. Press G to pour it in!', 'bad', 5000);
+      }
+      if (this.mounted !== null) { const a = this.active; a.vx *= 1 - 6 * dt; a.vz *= 1 - 6 * dt; }
+      return;
+    }
     if (this.fuel <= 0) {
       this.fuel = 0;
       this.phase = 'tow';
@@ -792,6 +1816,62 @@ export class Game {
       this.sfx.drone(0, 0);
       this.hud.toast(`⛽ Out of gas! Towing you to the nearest pump (−$${TOW_FEE})`, 'bad', 3000);
     }
+  }
+
+  /** G: pour the spare can into the tank (takes a moment, and only works parked). */
+  private startPour() {
+    if (this.phase !== 'play') return;
+    if (this.pouring > 0) return;
+    if (this.canFuel <= 0.5) { this.hud.toast('The spare can is empty. Fill it at a pump by parking next to one.', 'bad', 2600); return; }
+    if (this.fuel >= this.fuelMax - 1) { this.hud.toast('The tank is already full.', 'info', 1800); return; }
+    if (this.active.speed > 1.2) { this.hud.toast('Stop before pouring fuel — you need a steady hand.', 'info', 1800); return; }
+    // you can top up the mower you're sitting on, the truck, or a mower you walked back to
+    const rig = this.mounted === 'rig';
+    const near = this.mounted === 'mower' || rig ||
+      Math.hypot(this.feet.x - this.mowerPark.x, this.feet.z - this.mowerPark.z) <= 2.4 ||
+      (this.mowerLoaded ? Math.hypot(this.feet.x - this.rigMover.x, this.feet.z - this.rigMover.z) : Infinity) <= 3.2;
+    if (!near) {
+      this.hud.toast('Walk back to your mower or the truck to pour the can into it.', 'info', 2200);
+      return;
+    }
+    this.pouring = CAN_POUR_TIME;
+    this.sfx.pour();
+    const p = this.active;
+    this.popups.spawn('pouring…', p.x, 1.9, p.z, '#ffd23a', 0.9, 1.2);
+  }
+
+  private pourUpdate(dt: number) {
+    if (this.pouring <= 0) return;
+    this.pouring -= dt;
+    const room = this.fuelMax - this.fuel;
+    const move = Math.min(room, this.canFuel, (this.fuelMax / CAN_POUR_TIME) * dt * 0.55);
+    this.fuel += move;
+    this.canFuel -= move;
+    this.glugT -= dt;
+    if (this.glugT <= 0) {
+      this.glugT = 0.12;
+      this.sfx.glug();
+      this.sparks.spawn(this.mover.x + (Math.random() - 0.5) * 0.5, 0.9, this.mover.z + (Math.random() - 0.5) * 0.5, 0, 1.2, 0, 1, 0.85, 0.35, 0.12, 0.4, 0);
+    }
+    if (Math.random() < 0.5) {
+      const p = this.model.pipeTip;
+      this.sparks.spawn(this.mover.x + p.x * 0.4, 1.05, this.mover.z + 0.2, (Math.random() - 0.5) * 0.4, -2.5, (Math.random() - 0.5) * 0.4, 1, 0.8, 0.25, 0.1, 0.35, 9);
+    }
+    if (this.pouring <= 0 || room - move <= 0.02 || this.canFuel <= 0.02) {
+      this.pouring = 0;
+      if (this.canFuel <= 0.5) this.canFuel = 0;
+      this.canHinted = false;
+      this.sfx.cash();
+      this.hud.toast(this.canFuel > 0.5 ? '🛢️ Topped up. Still some left in the can.' : '🛢️ Spare can empty — fill it up at a pump.', 'good', 2600);
+    }
+  }
+
+  /** At a pump with the can empty and the tank full, the can refills for free as part of the stop. */
+  private refillCanAtPump(dt: number) {
+    const { d } = this.nearestPump();
+    if (d >= PUMP_R) return;
+    if (this.canFuel >= this.fuelMax * CAN_FRACTION - 0.5) return;
+    this.canFuel = Math.min(this.fuelMax * CAN_FRACTION, this.canFuel + (this.fuelMax * CAN_FRACTION) / 6 * dt);
   }
 
   private updateTow(dt: number) {
@@ -804,19 +1884,39 @@ export class Game {
     this.money = Math.max(0, this.money - TOW_FEE);
     this.fuel = this.fuelMax * 0.3;
     const { pump } = this.nearestPump();
-    m.place(pump.x + 0.2, pump.z, Math.PI / 2);
-    this.cam.snap(m.x, m.z);
+    if (!this.riding) {
+      // on foot with an empty can: they tow the mower in, and you climb on
+      this.mounted = 'mower';
+    }
+    if (this.mounted === 'rig') {
+      this.parkRigAt(pump.x + 0.2, pump.z + 4, Math.PI / 2);
+      this.cam.snap(this.rigMover.x, this.rigMover.z, this.rigMover.yaw);
+    } else {
+      m.place(pump.x + 0.2, pump.z, Math.PI / 2);
+      this.mowerPark = { x: m.x, z: m.z, yaw: m.yaw };
+      this.cam.snap(m.x, m.z, m.yaw);
+    }
     this.squash.jump(3);
     this.phase = 'play';
   }
 
-  private placeAtPump() { this.mover.place(PUMP.x + 0.2, PUMP.z, Math.PI / 2); }
+  private placeAtPump() {
+    this.mounted = 'mower';
+    this.blades = true;
+    this.pouring = 0;
+    this.mover.place(PUMP.x + 0.2, PUMP.z, Math.PI / 2);
+    this.mowerPark = { x: this.mover.x, z: this.mover.z, yaw: this.mover.yaw };
+    this.feet.place(this.mover.x, this.mover.z, Math.PI / 2);
+  }
 
   // ---------------------------------------------------------------- knocking and bookings
   private checkKnock() {
-    const m = this.mover;
+    const m = this.active;
+    // A mower can nose up to the step; on foot you stop against the wall itself, so the walker needs
+    // a slightly bigger zone or the house box would always hold it just out of reach.
+    const R = this.riding ? 1.15 : 1.7;
     let inZone = -1;
-    for (const lot of this.world.lots) if (Math.abs(m.x - lot.door.x) < 2 && Math.abs(m.z - lot.door.z) < 2 && Math.hypot(m.x - lot.door.x, m.z - lot.door.z) < 1.15) inZone = lot.id;
+    for (const lot of this.world.lots) if (Math.abs(m.x - lot.door.x) < R + 1 && Math.abs(m.z - lot.door.z) < R + 1 && Math.hypot(m.x - lot.door.x, m.z - lot.door.z) < R) inZone = lot.id;
     if (inZone < 0) { this.knockLock = -1; return; }
     if (this.knockLock === inZone) return;
     this.knockLock = inZone;
@@ -833,7 +1933,17 @@ export class Game {
       return;
     }
     if (st.status === 'rival') { this.hud.toast(`${who}: "Sorry, we signed with ${RIVAL}. Try again in ${st.rivalDays} day${st.rivalDays > 1 ? 's' : ''}."`, 'bad'); return; }
-    if (st.status === 'declined') { this.hud.toast(`No answer at #${lot.number}. They already said no today.`); return; }
+    // somebody who said no this morning gets one more go in the afternoon, for a price
+    if (st.status === 'declined') {
+      if (st.tries > 0 && this.hour < DAY_END - 1.25) {
+        this.sfx.knock();
+        this.phase = 'dialog';
+        this.openPitch(lot);
+        return;
+      }
+      this.hud.toast(`No answer at #${lot.number}. They already said no today.`);
+      return;
+    }
     this.sfx.knock();
     this.phase = 'dialog';
     if (this.hour > DAY_END - 1.25) {
@@ -842,28 +1952,130 @@ export class Game {
       ]);
       return;
     }
+    this.openPitch(lot);
+  }
+
+  /** The pitch card: full price, a discount, or a haggle. */
+  private openPitch(lot: Lot) {
+    const st = this.lots[lot.id];
+    if (st.status === 'prospect') { st.tries = 0; st.asked = 0; st.offer = null; }
+    const who = cap(lot.owner);
     const offer = st.offer ??= this.makeOffer(lot);
-    const cheap = Math.round(offer.price * 0.75);
-    const sample = st.cut / Math.max(1, lot.lawnCells.length) > 0.5;
-    const rookie = this.regulars ? 0 : 0.15;
-    const base = clamp(0.4 + rookie + (this.rep - 3) * 0.12 - st.grumpy * 0.3 + (sample ? 0.25 : 0), 0.05, 0.95);
-    const disc = clamp(base + 0.25, 0.05, 0.97);
     const due = this.dueTime(lot, offer.services);
-    const mood = st.grumpy > 0.6 ? 'They look grumpy.' : st.grumpy < 0.25 ? 'They seem friendly.' : 'They look busy.';
     const svc = ['🌱 mow', offer.services.sweep && '🍂 clear leaves', offer.services.edge && '📏 edge the paths', offer.services.hedge && '✂️ trim hedges'].filter(Boolean).join(' · ');
     const load = offer.days.map((d) => {
       const n = this.lots.filter((l) => l.status === 'client' && l.days.includes(d)).length;
       return `${WEEKDAYS[d]} <small>(${n} booked)</small>`;
     }).join(', ');
+    const mood = st.grumpy > 0.6 ? 'They look grumpy.' : st.grumpy < 0.25 ? 'They seem friendly.' : 'They look busy.';
+    const sample = st.cut / Math.max(1, lot.lawnCells.length) > 0.5;
+    const again = st.tries > 0;
     const body = `<i>*knock knock*</i> ${who} opens the door. ${mood}` +
+      (again ? '<br><i>"You again? Fine — what is it?"</i>' : '') +
       (sample ? '<br>"Oh! Did you already do half my lawn?"' : '') +
       `<div class="offer"><div><b>📅 ${offer.days.length}× a week:</b> ${load}</div><div><b>Each visit:</b> ${svc}</div>` +
-      `<div><b>Trial visit:</b> today, done by ${fmtHour(due)}</div></div>`;
-    this.hud.dialog(`#${lot.number} ${this.world.streets[lot.street].name} · ${who}`, body, [
-      { label: `Pitch $${offer.price}/visit`, sub: `${Math.round(base * 100)}% chance`, key: '1', primary: true, onPick: () => this.pitch(lot, offer, offer.price, base, due) },
-      { label: `Discount $${cheap}/visit`, sub: `${Math.round(disc * 100)}% chance`, key: '2', onPick: () => this.pitch(lot, offer, cheap, disc, due) },
-      { label: 'Leave', key: 'Esc', onPick: () => this.closeDialog() },
-    ]);
+      `<div><b>Trial visit:</b> today, done by ${fmtHour(due)}</div>` +
+      (again ? '<div class="haggle">They are already fed up. Haggle too often and they will show you the door.</div>' : '') + '</div>';
+    const opts: DialogOption[] = [];
+    const base = this.odds(st, true);
+    const cheap = Math.round(offer.price * 0.75);
+    const disc = this.odds(st, false);
+    opts.push({ label: `Pitch $${offer.price}/visit`, sub: `${Math.round(base * 100)}% chance`, key: '1', primary: true, onPick: () => this.pitch(lot, offer, offer.price, base, due) });
+    opts.push({ label: `Discount $${cheap}/visit`, sub: `${Math.round(disc * 100)}% chance`, key: '2', onPick: () => this.pitch(lot, offer, cheap, disc, due) });
+    // once they've turned you down, you can keep pushing on price or on what the job includes
+    if (st.tries > 0) {
+      const less: (Offer & { blurb: string }) | null = this.cheaperJob(offer);
+      if (less) {
+        opts.push({
+          label: `Haggle: $${less.price} for less`, sub: less.blurb, key: '3', onPick: () => this.haggle(lot, less, due),
+        });
+      }
+      opts.push({ label: 'Sweeten the deal (+$10)', sub: `raise the odds, ${'$'}10 off the first visit`, key: '4', onPick: () => this.sweeten(lot) });
+      opts.push({ label: 'Try again for full price', sub: `${Math.round(base * 100)}% chance`, key: '5', onPick: () => this.pitch(lot, offer, offer.price, base, due) });
+    }
+    opts.push({ label: again ? 'Give up' : 'Leave', key: 'Esc', onPick: () => this.retreat(lot) });
+    this.hud.dialog(`#${lot.number} ${this.world.streets[lot.street].name} · ${who}`, body, opts);
+  }
+
+  /** Odds of a yes. `full` uses the asking price; otherwise the discounted one. */
+  private odds(st: LotState, full: boolean) {
+    const sample = st.cut > 0;
+    const rookie = this.regulars ? 0 : 0.15;
+    const base = clamp(0.4 + rookie + (this.rep - 3) * 0.12 - st.grumpy * 0.3 + (sample ? 0.25 : 0), 0.05, 0.95);
+    return full ? base : clamp(base + 0.25, 0.05, 0.97);
+  }
+
+  /** A cheaper version of the same job: drop a service or a weekly visit. Null if there's nothing to drop. */
+  private cheaperJob(offer: Offer): (Offer & { blurb: string; key: string }) | null {
+    const drops: string[] = [];
+    if (offer.services.hedge) drops.push('hedge');
+    if (offer.services.edge) drops.push('edge');
+    if (offer.services.sweep) drops.push('sweep');
+    if (offer.days.length > 1) drops.push('visit');
+    if (!drops.length) return null;
+    const what = drops[0];
+    const services = { ...offer.services };
+    let days = offer.days;
+    let price = offer.price;
+    if (what === 'visit') { days = offer.days.slice(0, offer.days.length - 1); price = Math.round(price * 0.72); }
+    else {
+      (services as unknown as Record<string, boolean>)[what] = false;
+      price = Math.round(price - (what === 'hedge' ? 12 : what === 'edge' ? 9 : 10));
+    }
+    const blurb = what === 'visit' ? `${days.length}× a week instead of ${offer.days.length}` : `no ${what === 'sweep' ? 'leaf clearing' : what === 'edge' ? 'edging' : 'hedge trimming'}`;
+    return { price, days, services, blurb, key: what };
+  }
+
+  private haggle(lot: Lot, less: Offer & { blurb: string }, due: number) {
+    const st = this.lots[lot.id];
+    // dropping the price of the *whole* job reads as a real concession
+    const chance = clamp(0.55 + (this.rep - 3) * 0.08 - st.grumpy * 0.15, 0.25, 0.92);
+    if (Math.random() < chance) {
+      this.sign(lot, less, less.price, due);
+      this.hud.toast(`🤝 They took the smaller job: $${less.price}/visit, ${less.blurb}`, 'good', 4200);
+    } else this.turnedDown(lot, 'haggle');
+  }
+
+  private sweeten(lot: Lot) {
+    const st = this.lots[lot.id];
+    if (this.money < 10) { this.sfx.deny(); this.hud.toast("You haven't got $10 to spare.", 'bad', 1800); return; }
+    this.money -= 10;
+    st.grumpy = Math.max(0, st.grumpy - 0.35);
+    st.sweetened = true;
+    this.sfx.hmm();
+    this.closeDialog();
+    this.hud.toast('🍪 You offer to waive the first visit. They soften a little.', 'info', 2400);
+    setTimeout(() => {
+      if (this.phase !== 'play' || st.status === 'client' || st.status === 'job') return;
+      st.status = 'prospect';
+      st.tries = Math.max(1, st.tries); // keeps the haggle options on the card
+      this.phase = 'dialog';
+      this.openPitch(lot);
+    }, 900);
+  }
+
+  private retreat(lot: Lot) {
+    const st = this.lots[lot.id];
+    if (st.tries > 0) st.status = 'declined';
+    this.closeDialog();
+  }
+
+  /** They said no. Remember it so the next knock can haggle, and close the door after too many tries. */
+  private turnedDown(lot: Lot, why: 'pitch' | 'haggle') {
+    const st = this.lots[lot.id];
+    st.tries++;
+    st.grumpy = Math.min(1, st.grumpy + (why === 'haggle' ? 0.18 : 0.08));
+    st.status = 'declined';
+    this.sfx.rejected();
+    this.closeDialog();
+    const line = st.tries >= 3
+      ? '"That\'s enough now. Goodbye." *door closes firmly*'
+      : why === 'haggle'
+        ? '"That is still too rich for my blood. Come back with a better offer."'
+        : NO_THANKS[Math.floor(Math.random() * NO_THANKS.length)];
+    this.hud.toast(`🚪 ${cap(lot.owner)}: ${line}`, 'bad', 3600);
+    if (st.tries < 3) setTimeout(() => this.hud.toast('💬 Knock again to haggle — offer less, or drop a service.', 'info', 3400), 1400);
+    else { st.grumpy = 1; this.rep = clamp(this.rep - 0.1, 0, 5); }
   }
 
   /** What this owner wants: how often, which weekdays, which services, and the going rate. */
@@ -886,25 +2098,27 @@ export class Game {
   }
 
   private pitch(lot: Lot, offer: Offer, price: number, chance: number, due: number) {
+    if (Math.random() < chance) this.sign(lot, offer, price, due);
+    else this.turnedDown(lot, 'pitch');
+  }
+
+  /** Sign them up: the trial visit today, then the regular bookings. */
+  private sign(lot: Lot, offer: Offer, price: number, due: number) {
     const st = this.lots[lot.id];
     this.closeDialog();
-    if (Math.random() < chance) {
-      st.status = 'job';
-      st.pay = price;
-      st.deadline = due;
-      st.days = offer.days;
-      st.services = offer.services;
-      st.strikes = 0;
-      st.good = 0;
-      this.sfx.hired();
-      this.squash.jump(3.5);
-      this.sparks.burst(this.mover.x, 1, this.mover.z, 20, 4, 0.4, 1, 0.5, 0.25, 0.7, 6);
-      this.hud.toast(`🤝 Hired! Trial visit by ${fmtHour(due)}, then every ${dayList(offer.days)} for $${price}`, 'good', 4200);
-    } else {
-      st.status = 'declined';
-      this.sfx.rejected();
-      this.hud.toast(`🚪 ${cap(lot.owner)}: ${NO_THANKS[Math.floor(Math.random() * NO_THANKS.length)]}`, 'bad', 3200);
-    }
+    st.status = 'job';
+    st.pay = price;
+    st.deadline = due;
+    st.days = offer.days;
+    st.services = offer.services;
+    st.strikes = 0;
+    st.good = 0;
+    st.tries = 0;
+    this.sfx.hired();
+    this.squash.jump(3.5);
+    const m = this.mover;
+    this.sparks.burst(m.x, 1, m.z, 20, 4, 0.4, 1, 0.5, 0.25, 0.7, 6);
+    this.hud.toast(`🤝 Hired! Trial visit by ${fmtHour(due)}, then every ${dayList(offer.days)} for $${price}`, 'good', 4200);
   }
 
   private closeDialog() {
@@ -1008,20 +2222,34 @@ export class Game {
   }
 
   private buildGnomes() {
-    const lam = (c: string) => new THREE.MeshLambertMaterial({ color: c });
+    const lam = (c: string) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.7, metalness: 0.02 });
+    const ceramic = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.28, metalness: 0.05 });
     for (const lot of this.world.lots) for (const s of lot.gnomeSpots) {
       const g = new THREE.Group();
-      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.2, 0.4, 10), lam('#2f6fb5'));
-      body.position.y = 0.2;
-      const head = new THREE.Mesh(new THREE.SphereGeometry(0.12, 10, 8), lam('#f0c19a'));
+      // body: blue tunic, boots, a white beard and a pointed red hat, on a little base
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.22, 0.06, 12), lam('#b9b2a4'));
+      base.position.y = 0.03;
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.19, 0.36, 12), lam('#2f6fb5'));
+      body.position.y = 0.24;
+      for (const x of [-0.08, 0.08]) {
+        const boot = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.08, 0.14), lam('#3b2b20'));
+        boot.position.set(x, 0.09, 0.04);
+        g.add(boot);
+      }
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.12, 14, 10), lam('#f0c19a'));
       head.position.y = 0.5;
-      const beard = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.22, 8), lam('#f4f4f4'));
-      beard.position.set(0, 0.4, 0.08);
+      const nose = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 6), lam('#e8a882'));
+      nose.position.set(0, 0.49, 0.115);
+      const beard = new THREE.Mesh(new THREE.ConeGeometry(0.115, 0.26, 10), ceramic);
+      beard.position.set(0, 0.4, 0.06);
       beard.rotation.x = Math.PI;
-      const hat = new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.35, 10), lam('#d23a2c'));
-      hat.position.y = 0.75;
-      g.add(body, head, beard, hat);
-      g.traverse((o) => { o.castShadow = true; });
+      const hat = new THREE.Mesh(new THREE.ConeGeometry(0.135, 0.38, 12), new THREE.MeshStandardMaterial({ color: '#d23a2c', roughness: 0.35, metalness: 0.05 }));
+      hat.position.y = 0.76;
+      hat.rotation.z = 0.08;
+      const hatTip = new THREE.Mesh(new THREE.SphereGeometry(0.03, 6, 5), ceramic);
+      hatTip.position.set(0.03, 0.95, 0);
+      g.add(base, body, head, nose, beard, hat, hatTip);
+      g.traverse((o) => { if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.receiveShadow = true; } });
       this.world.scene.add(g);
       this.gnomes.push({ obj: g, hx: s.x, hz: s.z, x: s.x, z: s.z, vx: 0, vz: 0, spin: 0, tip: 0, knocked: false, lot: lot.id });
     }
@@ -1037,7 +2265,7 @@ export class Game {
   }
 
   private updateGnomes(dt: number) {
-    const m = this.mover;
+    const m = this.active;
     for (const g of this.gnomes) {
       if (!g.knocked && this.phase === 'play' && Math.abs(g.x - m.x) < 2 && Math.abs(g.z - m.z) < 2) {
         const dx = g.x - m.x, dz = g.z - m.z, d = Math.hypot(dx, dz);
@@ -1082,8 +2310,30 @@ export class Game {
       if (this.windT <= 0) {
         this.windT = 0.35;
         const open = this.world.lots.filter((l) => this.open(l));
-        this.leaves.drop(open[Math.floor(Math.random() * open.length)]);
+        const lot = open[Math.floor(Math.random() * open.length)];
+        this.leaves.drop(lot);
+        // now and then a whole drift lifts off and swirls
+        if (Math.random() < 0.5) {
+          const c = lot.pavedCells[Math.floor(Math.random() * lot.pavedCells.length)];
+          this.leaves.gust(cellX(c), cellZ(c), 5.5, 6.5, 3.2, lot.id);
+        }
       }
+    }
+  }
+
+  /** Clouds crawl across the sky with the wind, and the dome stays centred on the camera. */
+  private updateSky(dt: number) {
+    const sky = this.world.sky;
+    if (!sky) return;
+    sky.position.set(this.engine.camera.position.x, 0, this.engine.camera.position.z);
+    this.cloudT -= dt;
+    if (this.cloudT > 0) return;
+    this.cloudT = 0.05;
+    for (const o of this.clouds) {
+      o.position.x += dt * 0.05 * this.wx.wind * 40;
+      const a = Math.atan2(o.position.z, o.position.x);
+      const r = Math.hypot(o.position.x, o.position.z);
+      if (r > 150) { o.position.x = Math.cos(a) * -140; o.position.z = Math.sin(a) * -140; }
     }
   }
 
@@ -1139,7 +2389,7 @@ export class Game {
       s.scale.set(sc, sc, 1);
       mat.opacity = key === 'declined' || key === 'booked' ? 0.6 : 1;
       s.position.set(lot.door.x, 4.6 + Math.sin(t * 2.2 + i) * 0.18, lot.door.z);
-      const near = Math.hypot(this.mover.x - lot.door.x, this.mover.z - lot.door.z);
+      const near = Math.hypot(this.active.x - lot.door.x, this.active.z - lot.door.z);
       if (this.phase !== 'title') mat.opacity *= clamp((near - 2) / 4, 0.15, 1);
     });
     for (const s of this.world.streets) {
@@ -1153,7 +2403,7 @@ export class Game {
 
   /** Houses and tree crowns between the camera and the mower go see-through. */
   private updateFades(dt: number) {
-    const m = this.mover, k = Math.min(1, dt * 8);
+    const m = this.active, k = Math.min(1, dt * 8);
     const playing = this.phase !== 'title';
     for (const lot of this.world.lots) {
       const b = lot.houseBox;
@@ -1174,7 +2424,7 @@ export class Game {
   }
 
   private updateLighting() {
-    const w = this.world, m = this.mover;
+    const w = this.world, m = this.active;
     w.sun.position.set(m.x + 18, 32, m.z + 14);
     w.sun.target.position.set(m.x, 0, m.z);
     const h = this.phase === 'title' ? 10 : this.hour;
@@ -1184,7 +2434,8 @@ export class Game {
     w.sun.intensity = (2.2 - eve * 0.7) * (1 - cloud * 0.6);
     w.hemi.intensity = (1.1 - eve * 0.35) * (1 - cloud * 0.15);
     const sky = this.tmp.set(0.62, 0.83, 0.94).lerp(new THREE.Vector3(0.95, 0.68, 0.5), eve * 0.75 * (1 - cloud * 0.6)).lerp(new THREE.Vector3(0.55, 0.6, 0.66), cloud * 0.8);
-    (w.scene.background as THREE.Color).setRGB(sky.x, sky.y, sky.z, THREE.SRGBColorSpace);
+    // the panoramic sky dome sits under the scene background, and its tint follows the hour
+    if (w.sky) (w.sky.material as THREE.MeshBasicMaterial).color.setRGB(0.55 + eve * 0.5 + cloud * 0.35, 0.55 + eve * 0.35 + cloud * 0.35, 0.58 + cloud * 0.35);
     (w.scene.fog as THREE.Fog).color.setRGB(sky.x, sky.y, sky.z, THREE.SRGBColorSpace);
   }
 
@@ -1202,13 +2453,17 @@ export class Game {
         here: this.curLot === i,
         trial: st.status === 'job',
         crew: st.crew >= 0 ? this.crew[st.crew]?.name ?? null : null,
-        d: Math.hypot(lot.centre.x - this.mover.x, lot.centre.z - this.mover.z) + (st.crew >= 0 ? 1000 : 0) - (st.status === 'job' ? 500 : 0),
+        d: Math.hypot(lot.centre.x - this.active.x, lot.centre.z - this.active.z) + (st.crew >= 0 ? 1000 : 0) - (st.status === 'job' ? 500 : 0),
       });
     });
     jobs.sort((a, b) => a.d - b.d);
     this.hud.update({
       regulars: this.regulars, money: this.money, dayLabel: `${WEEKDAYS[this.weekday]} · Wk ${this.weekNo}`, hour: this.hour, rep: this.rep,
-      weather: WEATHER[this.today].icon, fuel: this.fuel, fuelMax: this.fuelMax, refueling: this.refueling, jobs,
+      weather: WEATHER[this.today].icon, fuel: this.fuel, fuelMax: this.fuelMax, refueling: this.refueling,
+      can: this.canFuel, blades: this.blades, riding: this.riding, jobs,
+      mounted: this.mounted, tool: this.tool ? toolDef(this.tool).icon + ' ' + toolDef(this.tool).name : null,
+      toolFuel: this.toolFuel, loading: this.loading, mowerLoaded: this.mowerLoaded,
+      stranded: this.fuel / Math.max(1, this.fuelMax) < 0.2 && this.canFuel <= 0.5 && !this.refueling && this.nearestPump().d >= PUMP_R + 1,
     });
   }
 
@@ -1241,11 +2496,19 @@ export class Game {
       g.fillStyle = '#ffd23a';
       g.beginPath(); g.arc(X(s.pump.x), Z(s.pump.z), 2.5, 0, Math.PI * 2); g.fill();
     }
+    // the rig and trailer, so you can always find where you left the truck
+    g.fillStyle = '#c07ae0';
+    g.fillRect(X(this.trailer.x) - 3, Z(this.trailer.z) - 2, 6, 4);
+    g.fillRect(X(this.rigMover.x) - 3, Z(this.rigMover.z) - 2, 6, 4);
     const dot = (mv: Mover, color: string, r: number) => { g.fillStyle = color; g.beginPath(); g.arc(X(mv.x), Z(mv.z), r, 0, Math.PI * 2); g.fill(); };
     for (const c of this.crew) dot(c.npc.mover, '#5dff9a', 2.6);
     if (this.rival.active) dot(this.rival.npc.mover, '#5aa0ff', 2.6);
-    const m = this.mover;
-    dot(m, '#fff', 3.2);
+    const m = this.active;
+    if (!this.riding) {
+      g.fillStyle = '#ffd23a';
+      g.beginPath(); g.arc(X(this.mowerPark.x), Z(this.mowerPark.z), 2.4, 0, Math.PI * 2); g.fill();
+    }
+    dot(m, '#fff', this.riding ? 3.2 : 2.6);
     g.strokeStyle = '#fff'; g.lineWidth = 1.5;
     g.beginPath(); g.moveTo(X(m.x), Z(m.z)); g.lineTo(X(m.x) + Math.sin(m.yaw) * 7, Z(m.z) + Math.cos(m.yaw) * 7); g.stroke();
   }

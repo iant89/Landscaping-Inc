@@ -15,6 +15,21 @@ export interface JobLine {
 export interface HudData {
   money: number; dayLabel: string; hour: number; rep: number; weather: string;
   fuel: number; fuelMax: number; refueling: boolean;
+  /** Fuel left in the spare can, same units. */
+  can: number;
+  /** Blades engaged, and whether you're riding the mower or on foot. */
+  blades: boolean; riding: boolean;
+  /** What you're driving: the mower, the truck and trailer, or nothing (on foot). */
+  mounted: 'mower' | 'rig' | null;
+  /** The hand tool you're carrying, if any, and how much fuel it has. */
+  tool: string | null;
+  toolFuel: number;
+  /** > 0 while the winch is loading the mower. */
+  loading: number;
+  /** Is the mower strapped on the trailer? */
+  mowerLoaded: boolean;
+  /** Stranded with no fuel anywhere: show the refuel hint. */
+  stranded: boolean;
   jobs: JobLine[]; regulars: number;
 }
 export type CellState = 'done' | 'missed' | 'due' | 'later';
@@ -62,8 +77,11 @@ export class Hud {
   private stats: HTMLDivElement;
   private fuelBar: HTMLDivElement;
   private fuelText: HTMLDivElement;
+  private canEl: HTMLDivElement;
+  private modeEl: HTMLDivElement;
   private jobs: HTMLDivElement;
   private toasts: HTMLDivElement;
+  private tutorialEl: HTMLDivElement | null = null;
   private overlay: HTMLDivElement;
   private dialogKeys: DialogOption[] = [];
 
@@ -77,8 +95,10 @@ export class Hud {
     this.fuelText = h('div', 'fuel-text');
     const track = h('div', 'fuel-track');
     track.appendChild(this.fuelBar);
+    this.canEl = h('div', 'can-text');
     fuel.append(h('span', 'fuel-icon', '⛽'), track, this.fuelText);
-    tl.append(this.stats, fuel);
+    this.modeEl = h('div', 'mode');
+    tl.append(this.stats, fuel, this.canEl, this.modeEl);
     this.jobs = h('div', 'panel jobs');
     const tr = h('div', 'tr');
     this.minimap = h('canvas', 'panel minimap');
@@ -113,9 +133,26 @@ export class Hud {
       `<div class="clock">${d.dayLabel} · ${fmtHour(d.hour)} <span class="wx">${d.weather}</span></div>` +
       `<div class="rep" title="Reputation">${stars(d.rep)} <span>${d.rep.toFixed(1)}</span></div>`;
     const f = d.fuel / d.fuelMax;
+    const cf = d.fuelMax ? d.can / d.fuelMax : 0;
     this.fuelBar.style.width = `${(f * 100).toFixed(1)}%`;
     this.fuelBar.className = `fuel-fill${f < 0.2 ? ' low' : ''}${d.refueling ? ' filling' : ''}`;
     this.fuelText.textContent = d.refueling ? 'Filling…' : `${Math.ceil(f * 100)}%`;
+    this.canEl.innerHTML = `<span class="jerry${cf > 0 ? '' : ' empty'}">🛢️</span>${cf > 0 ? `${Math.ceil(cf * 100)}%` : 'empty'}<span class="k">G</span>`;
+    const chips: string[] = [];
+    if (d.mounted === 'rig') {
+      chips.push('<span class="chip-mode rig">🚚 driving the rig</span>');
+    } else if (d.mounted === 'mower') {
+      chips.push('<span class="chip-mode">🚜 mowing</span>');
+      chips.push(`<span class="chip-mode ${d.blades ? 'on' : 'off'}">${d.blades ? '🌀 blades on' : '⏸ blades off'} <span class="k">B</span></span>`);
+    } else {
+      chips.push('<span class="chip-mode walk">🚶 on foot</span>');
+    }
+    if (d.loading > 0) chips.push('<span class="chip-mode loading">⛓️ hitching up…</span>');
+    if (d.mowerLoaded) chips.push('<span class="chip-mode">🛖 mower stowed <span class="k">L</span></span>');
+    if (d.tool) chips.push(`<span class="chip-mode tool">${d.tool} <b>${Math.ceil(d.toolFuel * 100)}%</b></span>`);
+    chips.push(`<span class="chip-mode"><span class="k">E</span> ${d.mounted ? 'get off' : 'climb on'}</span>`);
+    if (d.stranded) chips.push('<span class="chip-mode warn">⛽ stranded — follow the arrow</span>');
+    this.modeEl.innerHTML = chips.join('');
     if (!d.jobs.length) {
       this.jobs.innerHTML = d.regulars
         ? '<div class="hint">✅ Nothing left on today\'s schedule. Knock on doors marked <b>!</b> to grow the business.</div>'
@@ -190,8 +227,11 @@ export class Hud {
         <li>Some also want leaves cleared 🍂, edges trimmed 📏 or hedges cut ✂️</li>
         <li>Rain makes grass shoot up; wind brings leaves. Watch out for Green Giant Lawns.</li>
         <li>Hire crew to mow your regulars, and win more streets as your reputation grows</li>
+        <li><b class="key">E</b> hop off and walk (a parked mower barely drinks fuel) · <b class="key">B</b> blades off · <b class="key">G</b> pour the spare can</li>
+        <li>Load the mower on the trailer and drive the pickup to a far street — <b class="key">L</b> winches it on · <b class="key">T</b> swaps gear at the trailer</li>
+        <li>Rung down? Knock again and <b>haggle</b> — cheaper rate, or drop a service they don't need</li>
       </ul>
-      <div class="controls">WASD / arrows to drive · Shift for full throttle · C for schedule · Esc to pause · M to mute</div>`);
+      <div class="controls">WASD / arrows to drive (relative to the camera) · Shift full throttle · E mount/dismount · B blades · F use a tool · L load the mower · T trailer · G spare can · middle-drag to orbit, R to snap behind · C schedule · Esc pause · M mute</div>`);
     const opts: DialogOption[] = [];
     if (hasSave) opts.push({ label: 'Continue', key: '⏎', primary: true, onPick: onContinue });
     opts.push({ label: hasSave ? 'New business' : 'Start mowing', key: hasSave ? 'N' : '⏎', primary: !hasSave, onPick: onNew });
@@ -199,8 +239,68 @@ export class Hud {
     this.open(card, opts, 'center');
   }
 
-  pause(onResume: () => void, onMute: () => void, muted: boolean, onQuit: () => void) {
+  /**
+   * The new-game guided tour: a small card in the corner that does not stop you playing. It moves on
+   * when you do the thing it asks, when you hit Next, or on its own after a while.
+   */
+  /** The full controls sheet, openable from the pause menu (and after skipping the tour). */
+  controls(onClose: () => void) {
+    const rows: [string, string][] = [
+      ['WASD / arrows', 'Drive, or walk on foot'],
+      ['Shift', 'Full throttle'],
+      ['E', 'Climb into the nearest vehicle / hop out'],
+      ['B', 'Blades on or off (only on the mower)'],
+      ['F', 'Hold to run the tool in your hands'],
+      ['L', 'Winch the mower on, or roll it off the trailer'],
+      ['T', 'Trailer menu: swap tools'],
+      ['G', 'Pour the spare fuel can'],
+      ['Middle-drag', 'Orbit the camera (Shift+drag also works). It holds still while you drive and settles behind you when you stop.'],
+      ['R', 'Snap the camera in behind you'],
+      ['C', 'Schedule'],
+      ['H', 'Replay the tutorial'],
+      ['Esc', 'Pause · M mutes'],
+    ];
+    const card = h('div', 'card', `<div class="card-title">🎮 Controls</div><div class="keylist">${rows.map(([k, v]) => `<div><b>${k}</b><span>${v}</span></div>`).join('')}</div>`);
+    const opts: DialogOption[] = [{ label: 'Back', key: 'Esc', primary: true, onPick: onClose }];
+    card.appendChild(this.buttons(opts));
+    this.open(card, opts, 'center');
+  }
+
+  tutorial(d: { step: number; total: number; icon: string; title: string; body: string; keys: string; onNext: () => void; onSkip: () => void }) {
+    if (!this.tutorialEl) {
+      this.tutorialEl = h('div', 'tutorial-card');
+      this.root.appendChild(this.tutorialEl);
+    }
+    const dots = Array.from({ length: d.total }, (_, i) => `<span class="dot${i < d.step ? ' done' : i === d.step ? ' now' : ''}"></span>`).join('');
+    const el = this.tutorialEl;
+    el.className = 'tutorial-card on';
+    el.innerHTML = `
+      <div class="steps">${dots}<span class="step-n">${d.step + 1} / ${d.total}</span></div>
+      <div class="tut-head"><span class="tut-icon">${d.icon}</span><b>${d.title}</b></div>
+      <div class="tut-body">${d.body}</div>
+      <div class="tut-keys">${d.keys}</div>`;
+    const row = h('div', 'tut-buttons');
+    const next = h('button', 'btn primary small', d.step + 1 === d.total ? 'Start working' : 'Next');
+    next.onclick = d.onNext;
+    const skip = h('button', 'btn small', 'Skip');
+    skip.onclick = d.onSkip;
+    row.append(next, skip);
+    el.appendChild(row);
+  }
+
+  hideTutorial() {
+    if (!this.tutorialEl) return;
+    this.tutorialEl.className = 'tutorial-card';
+    this.tutorialEl.innerHTML = '';
+  }
+
+  pause(onResume: () => void, onMute: () => void, muted: boolean, onQuit: () => void, onHelp?: () => void) {
     const card = h('div', 'card', '<div class="card-title">Paused</div>');
+    if (onHelp) {
+      const help = h('button', 'btn', 'Controls');
+      help.onclick = onHelp;
+      card.appendChild(help);
+    }
     const opts: DialogOption[] = [
       { label: 'Resume', key: 'Esc', primary: true, onPick: onResume },
       { label: muted ? 'Sound on' : 'Sound off', key: 'M', onPick: onMute },
