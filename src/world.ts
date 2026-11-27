@@ -78,8 +78,9 @@ export interface World {
   grounds: Ground[];
   sun: THREE.DirectionalLight;
   hemi: THREE.HemisphereLight;
-  /** The gradient sky dome; it follows the camera each frame. */
+  /** The gradient sky dome and its cloud sprites; the dome follows the camera each frame. */
   sky: THREE.Mesh;
+  clouds: THREE.Sprite[];
 }
 
 export const LAWN_UNCUT = 'rgba(61,106,42,0.82)';
@@ -132,7 +133,7 @@ export function buildWorld(seed = 1): World {
   sun.shadow.normalBias = 0.025;
   sun.shadow.radius = 2.2;
   scene.add(sun, sun.target);
-  const sky = buildSky(scene);
+  const { sky, clouds } = buildSky(scene);
 
   // a dim cool fill from the opposite side so shadowed faces aren't black
   const fill = new THREE.DirectionalLight('#bcd6ff', 0.35);
@@ -391,7 +392,7 @@ export function buildWorld(seed = 1): World {
     { minX: MIN_X - B, maxX: MAX_X + B, minZ: MAX_Z - 0.5, maxZ: MAX_Z + B },
   );
 
-  return { scene, streets, lots, boxes, trees, hedges, kind, owner, edge, grounds, sun, hemi, sky };
+  return { scene, streets, lots, boxes, trees, hedges, kind, owner, edge, grounds, sun, hemi, sky, clouds };
 }
 
 function classify(lot: Lot, lx: number, d: number, blockers: { lot: Lot; lx: number; d: number; r: number }[]) {
@@ -528,14 +529,14 @@ function paintGround(w: { grounds: Ground[] }, lots: Lot[], kind: Uint8Array, rn
  * Sky: a big inverted sphere with a vertical gradient (deep blue overhead, pale at the horizon),
  * plus a handful of soft cloud sprites. Fog fades the far ground into the horizon colour.
  */
-function buildSky(scene: THREE.Scene): THREE.Mesh {
-  const geo = new THREE.SphereGeometry(340, 24, 16);
+function buildSky(scene: THREE.Scene): { sky: THREE.Mesh; clouds: THREE.Sprite[] } {
+  const geo = new THREE.SphereGeometry(165, 28, 18);
   const pos = geo.attributes.position;
   const col: number[] = [];
   const top = new THREE.Color('#5aa6e8'), mid = new THREE.Color('#a8d8f0'), low = new THREE.Color('#dceef8');
   const c = new THREE.Color();
   for (let i = 0; i < pos.count; i++) {
-    const h = Math.max(0, Math.min(1, (pos.getY(i) / 340 + 0.15) / 1.1));
+    const h = Math.max(0, Math.min(1, (pos.getY(i) / 165 + 0.15) / 1.1));
     if (h < 0.35) c.copy(low).lerp(mid, h / 0.35); else c.copy(mid).lerp(top, (h - 0.35) / 0.65);
     col.push(c.r, c.g, c.b);
   }
@@ -559,16 +560,18 @@ function buildSky(scene: THREE.Scene): THREE.Mesh {
   }
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
+  const clouds: THREE.Sprite[] = [];
   for (let k = 0; k < 14; k++) {
     const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.55 + Math.random() * 0.3, depthWrite: false, fog: false }));
-    const a = Math.random() * Math.PI * 2, r = 60 + Math.random() * 160;
-    sp.position.set(Math.cos(a) * r, 55 + Math.random() * 45, Math.sin(a) * r);
+    const a = Math.random() * Math.PI * 2, r = 40 + Math.random() * 95;
+    sp.position.set(Math.cos(a) * r, 48 + Math.random() * 40, Math.sin(a) * r);
     const sc = 50 + Math.random() * 70;
     sp.scale.set(sc, sc * 0.5, 1);
     sp.renderOrder = -999;
     scene.add(sp);
+    clouds.push(sp);
   }
-  return sky;
+  return { sky, clouds };
 }
 
 // ---------------------------------------------------------------- props

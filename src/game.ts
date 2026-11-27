@@ -119,6 +119,8 @@ export class Game {
   private walkT = 0;
   private deckT = 0;
   private puffT = 0;
+  private cloudT = 0;
+  private clouds: THREE.Sprite[] = [];
   private canHinted = false;
   gnomes: Gnome[] = [];
   crew: Crew[] = [];
@@ -178,6 +180,7 @@ export class Game {
       shadows: true,
     });
     this.world = buildWorld(7);
+    this.clouds = this.world.clouds;
     if (this.engine.isTouch) this.world.sun.shadow.mapSize.set(1024, 1024);
     this.engine.scene = this.world.scene;
     this.grass = new Grass(this.world, this.engine.isTouch ? 1 : 2);
@@ -560,6 +563,7 @@ export class Game {
     this.updateMarkers(t);
     this.updateFades(dt);
     this.updateLighting();
+    this.updateSky(dt);
     this.leaves.update(dt, t, this.wx.wind, this.onLeafLand);
     if (this.phase === 'play') this.refillCanAtPump(dt);
     this.canModel.visible = this.canFuel > 0.02;
@@ -1534,6 +1538,22 @@ export class Game {
     }
   }
 
+  /** Clouds crawl across the sky with the wind, and the dome stays centred on the camera. */
+  private updateSky(dt: number) {
+    const sky = this.world.sky;
+    if (!sky) return;
+    sky.position.set(this.engine.camera.position.x, 0, this.engine.camera.position.z);
+    this.cloudT -= dt;
+    if (this.cloudT > 0) return;
+    this.cloudT = 0.05;
+    for (const o of this.clouds) {
+      o.position.x += dt * 0.05 * this.wx.wind * 40;
+      const a = Math.atan2(o.position.z, o.position.x);
+      const r = Math.hypot(o.position.x, o.position.z);
+      if (r > 150) { o.position.x = Math.cos(a) * -140; o.position.z = Math.sin(a) * -140; }
+    }
+  }
+
   private buildMarkers() {
     const mk = (ch: string, bg: string, fg = '#fff', size = 72) => {
       const c = document.createElement('canvas');
@@ -1632,10 +1652,7 @@ export class Game {
     w.hemi.intensity = (1.1 - eve * 0.35) * (1 - cloud * 0.15);
     const sky = this.tmp.set(0.62, 0.83, 0.94).lerp(new THREE.Vector3(0.95, 0.68, 0.5), eve * 0.75 * (1 - cloud * 0.6)).lerp(new THREE.Vector3(0.55, 0.6, 0.66), cloud * 0.8);
     // the panoramic sky dome sits under the scene background, and its tint follows the hour
-    if (w.sky) {
-      w.sky.position.set(this.engine.camera.position.x, 0, this.engine.camera.position.z);
-      (w.sky.material as THREE.MeshBasicMaterial).color.setRGB(0.55 + eve * 0.5 + cloud * 0.35, 0.55 + eve * 0.35 + cloud * 0.35, 0.58 + cloud * 0.35);
-    }
+    if (w.sky) (w.sky.material as THREE.MeshBasicMaterial).color.setRGB(0.55 + eve * 0.5 + cloud * 0.35, 0.55 + eve * 0.35 + cloud * 0.35, 0.58 + cloud * 0.35);
     (w.scene.fog as THREE.Fog).color.setRGB(sky.x, sky.y, sky.z, THREE.SRGBColorSpace);
   }
 
