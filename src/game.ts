@@ -160,6 +160,8 @@ export class Game {
   trailer = { x: 0, z: 0, yaw: 0, vx: 0, vz: 0 };
   truck: RigModel;
   trailerModel: RigModel;
+  /** The tools hanging on the trailer rack, one per TOOLS entry. */
+  rackTools: THREE.Group[] = [];
   /** True while the mower is strapped to the trailer. */
   mowerLoaded = true;
   /** > 0 while the winch is dragging the mower on or off. */
@@ -279,6 +281,15 @@ export class Game {
     this.world.scene.add(this.canModel);
     this.truck = buildTruck();
     this.trailerModel = buildTrailer();
+    // the three hand tools hang on the trailer's rack until you take one
+    this.trailerModel.toolSlots.forEach((slot, i) => {
+      const t = buildTool(TOOLS[i].id);
+      t.root.scale.setScalar(0.72);
+      t.root.rotation.set(-1.15, 0, 0);
+      t.root.position.set(0, -0.18, 0.05);
+      slot.add(t.root);
+      this.rackTools.push(t.root);
+    });
     this.world.scene.add(this.truck.root, this.trailerModel.root);
     this.fuelArrow = buildFuelArrow();
     this.fuelArrow.visible = false;
@@ -603,6 +614,9 @@ export class Game {
 
   /** Middle-mouse drag orbits the camera around the player; drag up/down tilts a little. */
   private orbitDrag: { x: number; y: number } | null = null;
+  /** What we were driving last frame, and how long the camera has to settle into the new distance. */
+  private camMode: 'mower' | 'rig' | null | undefined = undefined;
+  private camEase = 0;
 
   private setupOrbit() {
     const el = this.engine.renderer.domElement;
@@ -649,9 +663,8 @@ export class Game {
     if (code === 'KeyR' && this.orbitDrag === null) {
       // put the camera back where it belongs
       this.cam.orbit = 0;
-      const k = this.mounted === 'rig' ? 1 : this.mounted === 'mower' ? 0.74 : 0.5;
-      this.cam.o.offset.y = 13.2 * k + (this.mounted === 'rig' ? 3.3 : 0);
-      this.cam.o.offset.z = 7.0 * k;
+      this.cam.o.offset.y = this.mounted === 'rig' ? 16.5 : this.mounted === 'mower' ? 13.2 : 8.4;
+      this.cam.o.offset.z = this.mounted === 'rig' ? 9.0 : this.mounted === 'mower' ? 7.0 : 4.9;
     }
     if (code === 'KeyT') this.openTrailer();
   };
@@ -722,6 +735,8 @@ export class Game {
     }
     this.trailerModel.root.position.set(this.trailer.x, 0, this.trailer.z);
     this.trailerModel.root.rotation.y = this.trailer.yaw;
+    // a tool you're carrying is off the rack
+    TOOLS.forEach((t, i) => { const g = this.rackTools[i]; if (g) g.visible = this.tool !== t.id; });
     const tfwd = this.trailer.vx * Math.sin(this.trailer.yaw) + this.trailer.vz * Math.cos(this.trailer.yaw);
     for (const w of this.trailerModel.wheels) w.rotation.x += (tfwd * dt) / 0.34;
     // the spare cans in the bed empty as they're used
@@ -760,7 +775,9 @@ export class Game {
    */
   private updateFuelArrow(dt: number, t: number) {
     const low = this.fuel / Math.max(1, this.fuelMax) < 0.2;
-    const show = low && this.canFuel <= 0.5 && this.phase !== 'title' && this.phase !== 'evening';
+    const atPump = this.nearestPump().d < PUMP_R + 1;
+    const show = low && this.canFuel <= 0.5 && !atPump && !this.refueling &&
+      this.phase !== 'title' && this.phase !== 'evening' && this.phase !== 'paused' && this.phase !== 'schedule';
     this.fuelArrow.visible = show;
     if (!show) return;
     const p = this.active;
@@ -1035,6 +1052,17 @@ export class Game {
     this.cam.behind += (wantBehind - this.cam.behind) * Math.min(1, dt * 2.2);
     this.cam.heading = m.yaw;
     this.cam.update(dt, m.x, m.z, m.vx, m.vz, this.boost);
+    // a bigger vehicle wants a wider view: ease into the new distance when you change what you're
+    // driving, then leave the camera alone so a hand-tilted view stays where you put it
+    if (this.camMode !== this.mounted) { this.camMode = this.mounted; this.camEase = 1.4; }
+    if (this.camEase > 0 && this.orbitDrag === null) {
+      this.camEase = Math.max(0, this.camEase - dt);
+      const wantY = this.mounted === 'rig' ? 16.5 : this.mounted === 'mower' ? 13.2 : 8.4;
+      const wantZ = this.mounted === 'rig' ? 9.0 : this.mounted === 'mower' ? 7.0 : 4.9;
+      const o = this.cam.o.offset;
+      o.y += (wantY - o.y) * Math.min(1, dt * 3.5);
+      o.z += (wantZ - o.z) * Math.min(1, dt * 3.5);
+    }
   }
 
   // ---------------------------------------------------------------- on foot
@@ -1064,7 +1092,7 @@ export class Game {
       if (this.walkT <= 0) { this.walkT = 0.34; this.sfx.walk(Math.min(3, Math.floor(f.speed))); }
     }
     // the deck blast: leaves near the parked mower lift and tumble while the blades spin
-    if (this.blades) {
+    if (this.blades && !this.mowerLoaded) {
       this.deckT -= dt;
       if (this.deckT <= 0) { this.deckT = 0.2; this.leaves.gust(this.mowerPark.x, this.mowerPark.z, 1.6, 1.2, 1.6); }
     }
@@ -1167,7 +1195,18 @@ export class Game {
   /** Roll the mower off the trailer so you can drive it. */
   openRig() {
     if (this.phase !== 'play') return;
-    if (this.mounted !== 'rig') { this.hud.toast('Climb into the truck first (E).', 'info', 1800); return; }
+    // on foot you can still work the ramps, as long as you're at the trailer
+    if (this.mounted === null) {
+      const near = Math.min(
+        Math.hypot(this.feet.x - this.trailer.x, this.feet.z - this.trailer.z),
+        Math.hypot(this.feet.x - this.rigMover.x, this.feet.z - this.rigMover.z),
+      );
+      if (near > 7) { this.hud.toast('Walk over to the trailer to drop the ramps.', 'info', 1800); return; }
+      this.rigMover.vx = this.rigMover.vz = 0;
+    } else if (this.mounted !== 'rig') {
+      this.hud.toast('Get off the mower first (E), then head for the trailer.', 'info', 2000);
+      return;
+    }
     const m = this.rigMover;
     if (m.speed > 0.4) { this.hud.toast('Stop the truck before dropping the ramps.', 'info', 1800); return; }
     if (!this.mowerLoaded) { this.hud.toast('The mower is already off the trailer.', 'info', 1600); return; }
@@ -2349,7 +2388,7 @@ export class Game {
       can: this.canFuel, blades: this.blades, riding: this.riding, jobs,
       mounted: this.mounted, tool: this.tool ? toolDef(this.tool).icon + ' ' + toolDef(this.tool).name : null,
       toolFuel: this.toolFuel, loading: this.loading, mowerLoaded: this.mowerLoaded,
-      stranded: this.fuel / Math.max(1, this.fuelMax) < 0.2 && this.canFuel <= 0.5,
+      stranded: this.fuel / Math.max(1, this.fuelMax) < 0.2 && this.canFuel <= 0.5 && !this.refueling && this.nearestPump().d >= PUMP_R + 1,
     });
   }
 
