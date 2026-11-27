@@ -143,10 +143,8 @@ export class Game {
       adaptive: () => this.phase === 'play',
       onBlur: () => { this.controls.clear(); if (this.phase === 'play') this.pause(); },
       fov: 50, near: 0.1, far: 200,
+      shadows: true,
     });
-    const r = this.engine.renderer;
-    r.shadowMap.enabled = true;
-    r.shadowMap.type = THREE.PCFSoftShadowMap;
     this.world = buildWorld(7);
     if (this.engine.isTouch) this.world.sun.shadow.mapSize.set(1024, 1024);
     this.engine.scene = this.world.scene;

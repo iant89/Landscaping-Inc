@@ -1,15 +1,19 @@
 # Engine
 
 The movement and "game feel" core of Clean Sweep, pulled out so it can drive other games.
-It depends only on `three`. Clean Sweep itself runs on it (`src/game/Game.ts`), so it stays tested
-by a real game. Copy the `engine/` folder into a new project, or import from `engine/src`.
+It depends only on `three`. Clean Sweep runs on it (`src/game/Game.ts`) and so does Landscaping Inc.
+(`src/game.ts`), so it stays tested by real games. Copy the `engine/` folder into a new project, or
+import from `engine/src`.
 
 ```bash
-npm run dev      # (in this repo) play the game
-npm run build    # typecheck + production build
+npm run dev          # (in this repo) play Landscaping Inc.
+npm run build        # typecheck + production build
+npm run engine:demo  # play the engine demo game (Orb Rush) with hot reload
+npm run engine:build # build the demo into dist-demo/
 ```
 
-`src/main.ts` started as a complete small game (about 200 lines).
+`engine/demo/main.ts` (part of the vendored engine, not this game's source) is a complete small game
+in about 230 lines — the best starting point for building something new on the engine.
 
 ## Why it feels fluid
 
@@ -30,6 +34,7 @@ Clean Sweep feels smooth because of a few small habits that work together. The e
 | Synth audio | No sound files. Tones and noise, plus a motor drone whose pitch follows your speed | `Synth` |
 | Pop-up text | "+5", "BONK!" and similar text pops in, drifts up and fades, anchored to a world point | `Popups` |
 | Adaptive resolution | The pixel ratio drops automatically when frames stay slow | `Engine` |
+| Clean canvas input | The browser context menu is suppressed on the canvas (capture phase), and right-drag is free for games to use | `Engine` |
 
 ## Minimal game
 
@@ -64,6 +69,8 @@ Every class takes a partial options object, and the defaults are Clean Sweep's v
 - **`Mover`**: `maxSpeed`, `accel`/`decel` (higher = tighter, lower = icier), `turnRate`, `lean`/`leanMax`, `restitution` (1 = slide along walls, 1.5 = pinball), `radius`.
 - **`Squash`**: `stiffness`/`damping` (lower damping = more wobble), `limit`, `gravity` for hops.
 - **`FollowCamera`**: `offset` (height and distance), `lead`, `followRate`, `fov`/`boostFov`, `traumaDecay`, `shakeMove`/`shakeRoll`.
+- **`Engine`**: `shadows` (turn on PCFSoft shadow maps at construction; off by default, then set
+  `castShadow`/`receiveShadow` on your meshes), `maxDt`, `adaptive`, `onBlur`, `fov`/`near`/`far`/`background`.
 
 ## Collision model
 
