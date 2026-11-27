@@ -100,9 +100,23 @@ export function buildMower(colors: MowerColors = PLAYER_COLORS): MowerModel {
   deckRim.rotation.x = Math.PI / 2;
   deckRim.position.set(0, 0.16, 0.15);
   deckRim.scale.set(1.12, 0.8, 1);
-  const chuteM = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.14, 0.35), dark);
-  chuteM.position.set(0.95, 0.24, 0.15);
-  chuteM.rotation.z = -0.25;
+  // discharge chute: an open-sided funnel off the right of the deck, with a rubber flap
+  const chuteM = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.13, 0.34), bodyMat);
+  chuteM.position.set(0.94, 0.26, 0.15);
+  chuteM.rotation.z = -0.22;
+  const chuteFlap = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.2, 0.3), RUBBER());
+  chuteFlap.position.set(1.14, 0.16, 0.15);
+  chuteFlap.rotation.z = 0.18;
+  const deckBolt = (): THREE.Mesh[] => {
+    const out: THREE.Mesh[] = [];
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 6) * Math.PI * 2;
+      const bolt = new THREE.Mesh(new THREE.SphereGeometry(0.028, 6, 5), METAL());
+      bolt.position.set(Math.cos(a) * 0.72, 0.3, 0.15 + Math.sin(a) * 0.55);
+      out.push(bolt);
+    }
+    return out;
+  };
   const blade = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.02, 0.1), metal);
   blade.position.set(0, 0.12, 0.15);
 
@@ -136,7 +150,14 @@ export function buildMower(colors: MowerColors = PLAYER_COLORS): MowerModel {
     body.add(arm, hand);
   }
 
-  body.add(chassis, tub, hood, grille, bumper, badge, seat, cushion, back, column, wheel, dash, bladeLamp, deck, deckRim, chuteM, blade, engine, exhaust, torso, bib, head, cap, brim);
+  body.add(chassis, tub, hood, grille, bumper, badge, seat, cushion, back, column, wheel, dash, bladeLamp, deck, deckRim, chuteM, chuteFlap, blade, engine, exhaust, torso, bib, head, cap, brim, ...deckBolt());
+  // gauge wheels at the front corners of the deck, like a real mower
+  for (const x of [-0.78, 0.78]) {
+    const gw = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.06, 10), RUBBER());
+    gw.rotation.z = Math.PI / 2;
+    gw.position.set(x, 0.11, 0.72);
+    body.add(gw);
+  }
 
   // --- wheels: chunky turf tyres with hubs
   const wheels: THREE.Mesh[] = [];
