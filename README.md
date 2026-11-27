@@ -59,6 +59,7 @@ repository settings under **Pages → Source: GitHub Actions**.
 | `engine/` | The movement and game-feel engine from [Clean Sweep](https://github.com/iant89/Clean-Sweep); see `engine/README.md` |
 
 The engine is a copy of Clean Sweep's, so fixes don't sync between the two repos automatically. The
-folder is self-contained, so copying it across works.
+folder is self-contained, so copying it across works. `engine/src/` currently matches Clean Sweep's
+`main` exactly; `npm run engine:demo` plays Orb Rush, the engine-only demo game in `engine/demo/`.
 
 `window.game` exposes the running game in the browser console for debugging.

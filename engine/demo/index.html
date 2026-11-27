@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Orb Rush — engine demo</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0d0b16; overflow: hidden; font-family: system-ui, sans-serif; color: #fff; }
+      #app { position: fixed; inset: 0; }
+      #hud { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); font-weight: 800; font-size: 20px; pointer-events: none; text-shadow: 0 2px 6px #000; }
+      #msg { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; text-align: center; text-shadow: 0 2px 12px #000; }
+      #msg h1 { font-size: 56px; margin: 0 0 8px; letter-spacing: .06em; }
+      #msg p { margin: 4px; font-size: 18px; }
+      #msg .small { opacity: .7; font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hud"></div>
+    <div id="msg">
+      <h1>ORB RUSH</h1>
+      <p>WASD / arrows to drive · Shift for boost · M to mute</p>
+      <p class="small">Press Enter or tap to start</p>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
