@@ -327,10 +327,6 @@ export function buildWorld(seed = 1): World {
   }
 
   // ---------------------------------------------------------------- streets: pumps, barriers, cars, trees
-  const truck = buildTruck();
-  truck.position.set(PUMP.x - 6.5, 0, PUMP.z);
-  scene.add(truck);
-  boxes.push({ minX: PUMP.x - 13.5, maxX: PUMP.x - 2.2, minZ: PUMP.z - 1.15, maxZ: PUMP.z + 1.15 });
   const carColors = ['#c0392b', '#2e86c1', '#f4f6f7', '#27ae60', '#7d3c98', '#d4ac0d'];
   for (let si = 0; si < STREETS.length; si++) {
     const zc = streetZ(si);
@@ -743,55 +739,6 @@ function addTree(scene: THREE.Scene, x: number, z: number, rng: () => number): T
   crown.position.set(x, 0, z);
   scene.add(shadowed(trunk), ...branches.map((b) => shadowed(b)), shadowed(crown));
   return { x, z, mat, mats: [mat, matDark], fade: 1, h };
-}
-
-/** The work truck: cab, flatbed with the mower deck covering, signwriting and the spare fuel cans. */
-function buildTruck() {
-  const g = new THREE.Group();
-  const green = new THREE.MeshStandardMaterial({ color: '#1f6f43', roughness: 0.42, metalness: 0.3 });
-  const darkGlass = new THREE.MeshStandardMaterial({ color: '#7fb2d8', roughness: 0.12, metalness: 0.6 });
-  const steel = new THREE.MeshStandardMaterial({ color: '#9aa0a6', roughness: 0.4, metalness: 0.8 });
-  const rubber = new THREE.MeshStandardMaterial({ color: '#1d1d1f', roughness: 0.95 });
-
-  const cab = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.7, 2), green);
-  cab.position.set(-3.2, 1.25, 0);
-  const cabTop = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.5, 1.8), green);
-  cabTop.position.set(-3.2, 2.1, 0);
-  const hood = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1, 2), green);
-  hood.position.set(-4.9, 0.9, 0);
-  const bed = new THREE.Mesh(new THREE.BoxGeometry(3, 0.9, 2), green);
-  bed.position.set(-0.6, 0.85, 0);
-  const glass = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.7, 1.7), darkGlass);
-  glass.position.set(-4.25, 1.55, 0);
-  const sign = new THREE.Mesh(new THREE.BoxGeometry(2, 0.6, 0.05), new THREE.MeshBasicMaterial({ map: textTexture('LANDSCAPING INC.', '#ffd23a', '#1f6f43', 512, 128, 52) }));
-  sign.position.set(-3.2, 1.45, 1.03);
-  const sign2 = sign.clone();
-  sign2.position.z = -1.03;
-  sign2.rotation.y = Math.PI;
-  const trailer = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.25, 2), steel);
-  trailer.position.set(2.8, 0.6, 0);
-  const ramps = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.06, 0.4), steel);
-  ramps.position.set(4.6, 0.35, 0.6);
-  ramps.rotation.z = -0.25;
-  const cans: THREE.Mesh[] = [];
-  for (const z of [0.5, -0.5]) {
-    const can = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, 0.35), new THREE.MeshStandardMaterial({ color: '#c8362a', roughness: 0.55, metalness: 0.15 }));
-    can.position.set(3.8, 1.07, z);
-    cans.push(can);
-  }
-  const bumper = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.25, 2.1), steel);
-  bumper.position.set(-5.7, 0.6, 0);
-  g.add(cab, cabTop, hood, bed, glass, sign, sign2, trailer, ramps, bumper, ...cans);
-  for (const [x, z, r] of [[-4.5, 1, 0.42], [-4.5, -1, 0.42], [-1, 1, 0.42], [-1, -1, 0.42], [2.8, 1, 0.42], [2.8, -1, 0.42]]) {
-    const wh = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.3, 16), rubber);
-    wh.rotation.x = Math.PI / 2;
-    wh.position.set(x, r, z);
-    const hub = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.45, r * 0.45, 0.32, 10), steel);
-    hub.rotation.x = Math.PI / 2;
-    hub.position.copy(wh.position);
-    g.add(wh, hub);
-  }
-  return shadowed(g);
 }
 
 function buildGasStation() {

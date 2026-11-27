@@ -38,6 +38,11 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd3f0; col
 .chip-mode.on { background: #d4f1df; color: var(--green-dark); }
 .chip-mode.off { background: #fadad5; color: #a1281a; }
 .chip-mode.walk { background: #dfe9f5; color: #24476e; }
+.chip-mode.rig { background: #efe3f7; color: #5b2f7a; }
+.chip-mode.tool { background: #fff2d0; color: #7a5300; }
+.chip-mode.tool b { font-size: 10px; opacity: 0.75; }
+.chip-mode.loading { background: #ffe9c9; color: #8a4b00; animation: blink 0.7s steps(2) infinite; }
+.chip-mode.warn { background: var(--red); color: #fff; animation: blink 0.9s steps(2) infinite; }
 .chip-mode .k { position: static; opacity: 0.5; }
 .haggle { margin-top: 6px; font-size: 13px; color: #a1281a; font-weight: 700; }
 .how b.key, .how b.key { background: #3d5a86; color: #fff; border-radius: 5px; padding: 0 5px; }
@@ -153,3 +158,42 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd3f0; col
   .toasts { top: 150px; width: 92vw; }
   .toast { font-size: 13px; }
 }
+
+/* trailer menu */
+.card.dialog .tool-row { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 6px 10px; }
+.tools { display: grid; gap: 4px; margin: 10px 0 8px; }
+.tool-row { background: #f1eedf; border-radius: 10px; padding: 6px 10px; font-size: 13px; }
+.tool-row.on { background: #d4f1df; outline: 2px solid var(--green); }
+.tool-row small { grid-column: 2 / -1; font-size: 11px; opacity: 0.7; font-weight: 700; }
+.tool-row em { font-style: normal; font-size: 10px; font-weight: 900; text-transform: uppercase; color: var(--green-dark); }
+.fuel-note { font-size: 12px; font-weight: 700; opacity: 0.7; }
+
+/* the new-game tutorial: a corner card that never blocks play */
+.tutorial-card {
+  position: absolute; right: 12px; bottom: 12px; width: min(370px, calc(100vw - 24px));
+  background: rgba(255, 253, 245, 0.97); border-radius: 16px; box-shadow: var(--shadow);
+  border: 3px solid var(--gold); padding: 12px 14px; opacity: 0; transform: translateY(14px);
+  transition: opacity 0.25s, transform 0.25s; pointer-events: none;
+}
+.tutorial-card.on { opacity: 1; transform: none; pointer-events: auto; }
+.tutorial-card .steps { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
+.tutorial-card .dot { width: 7px; height: 7px; border-radius: 50%; background: #ded8c4; }
+.tutorial-card .dot.done { background: var(--green); }
+.tutorial-card .dot.now { background: var(--gold); transform: scale(1.35); }
+.tutorial-card .step-n { margin-left: auto; font-size: 10px; font-weight: 900; opacity: 0.5; letter-spacing: 0.06em; }
+.tut-head { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 900; }
+.tut-icon { font-size: 20px; }
+.tut-body { font-size: 13px; line-height: 1.45; margin-top: 4px; }
+.tut-keys { margin-top: 6px; font-size: 11px; font-weight: 800; opacity: 0.6; }
+.tut-buttons { display: flex; gap: 6px; margin-top: 10px; }
+.btn.small { flex: 1 1 auto; padding: 6px 10px; font-size: 13px; border-radius: 10px; flex-direction: row; }
+.btn.small:last-child:not(:first-child) { flex: 0 0 auto; }
+@media (max-width: 640px) {
+  .tutorial-card { bottom: auto; top: 172px; }
+}
+
+/* pause controls sheet */
+.keylist { display: grid; gap: 4px; margin: 4px 0 2px; }
+.keylist > div { display: grid; grid-template-columns: 128px 1fr; gap: 10px; align-items: baseline; background: #f1eedf; border-radius: 8px; padding: 5px 10px; font-size: 13px; }
+.keylist b { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--green-dark); }
+@media (max-width: 640px) { .keylist > div { grid-template-columns: 96px 1fr; font-size: 12px; } }

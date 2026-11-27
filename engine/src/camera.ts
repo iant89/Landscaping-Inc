@@ -41,6 +41,13 @@ export class FollowCamera {
   o: FollowCameraOptions;
   focus = new THREE.Vector3();
   trauma = 0;
+  /** Extra yaw the player has dragged in (radians) — orbits the camera around the focus. */
+  orbit = 0;
+  /** Facing of whatever we're following, so the camera can sit behind it. */
+  heading = 0;
+  /** 0 = fixed world-facing view (classic top-down), 1 = hard behind the subject. Eased by the game. */
+  behind = 0;
+  /** Where the orbit is centred when the player double-taps to reset. */
   private fovNow: number;
 
   /** `onProjection` is called when the FOV changes (the Engine uses it to rescale particles). */
@@ -57,7 +64,13 @@ export class FollowCamera {
   positionFor(focus: THREE.Vector3, out = new THREE.Vector3()) {
     const a = this.camera.aspect;
     const k = a < 1 ? 1 + (1 - a) * this.o.portraitPullback : 1;
-    return out.set(focus.x + this.o.offset.x * k, focus.y + this.o.offset.y * k, focus.z + this.o.offset.z * k);
+    // swing the offset around the focus: heading*behind puts the camera behind the subject, the
+    // player's own orbit adds on top. `+ PI` because the offset is stored pointing backwards.
+    const ang = this.heading * this.behind + this.orbit + Math.PI * this.behind;
+    const c = Math.cos(ang), s = Math.sin(ang);
+    const ox = this.o.offset.x * c + this.o.offset.z * s;
+    const oz = -this.o.offset.x * s + this.o.offset.z * c;
+    return out.set(focus.x + ox * k, focus.y + this.o.offset.y * k, focus.z + oz * k);
   }
 
   /** Jump straight to the target with no glide (after teleports, level loads, cutscenes). */
@@ -91,7 +104,18 @@ export class FollowCamera {
   }
 
   /** Point the camera at the current focus (after moving it yourself). */
-  lookAtFocus() { this.camera.lookAt(this.focus.x, 0, this.focus.z - this.o.lookAhead); }
+  lookAtFocus() {
+    // look at the focus itself once we're orbiting, so the subject stays in the middle of the view
+    const ahead = this.behind > 0.02 || Math.abs(this.orbit) > 0.02 ? this.o.lookAhead * (1 - this.behind) : this.o.lookAhead;
+    this.camera.lookAt(this.focus.x, 0, this.focus.z - ahead);
+  }
+
+  /** Snap the view behind the subject instantly (after a teleport or a scene change). */
+  snapBehind() {
+    const p = this.positionFor(this.focus);
+    this.camera.position.copy(p);
+    this.lookAtFocus();
+  }
 
   /** Apply (and decay) screen shake on top of wherever the camera currently is. */
   shake(dt: number) {
