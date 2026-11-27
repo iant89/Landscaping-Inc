@@ -189,7 +189,8 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd3f0; col
 .btn.small { flex: 1 1 auto; padding: 6px 10px; font-size: 13px; border-radius: 10px; flex-direction: row; }
 .btn.small:last-child:not(:first-child) { flex: 0 0 auto; }
 @media (max-width: 640px) {
-  .tutorial-card { bottom: auto; top: 172px; }
+  .tutorial-card { bottom: auto; top: 172px; width: calc(100vw - 24px); padding: 10px 12px; }
+  .tut-body { font-size: 12px; }
 }
 
 /* pause controls sheet */
