@@ -431,7 +431,7 @@ export class Game {
       this.parkRigAt(this.rigHome.x, this.rigHome.z, this.rigHome.yaw);
     }
     this.squash.reset();
-    this.cam.snap(this.active.x, this.active.z);
+    this.cam.snap(this.active.x, this.active.z, this.active.yaw);
     this.crew.forEach((c, i) => { c.lot = -1; c.npc.place(i * 3, 1.6); });
     this.rival.npc.place(RIVAL_HOME.x, RIVAL_HOME.z);
     this.rival.target = -1;
@@ -617,6 +617,8 @@ export class Game {
   /** What we were driving last frame, and how long the camera has to settle into the new distance. */
   private camMode: 'mower' | 'rig' | null | undefined = undefined;
   private camEase = 0;
+  /** Seconds the player has been standing still, so the camera only settles behind them at rest. */
+  private idleT = 0;
 
   private setupOrbit() {
     const el = this.engine.renderer.domElement;
@@ -632,7 +634,7 @@ export class Game {
     el.addEventListener('pointermove', (e) => {
       const d = this.orbitDrag;
       if (!d) return;
-      this.cam.orbit -= (e.clientX - d.x) * 0.006;
+      if (Math.abs(e.clientX - d.x) > 0) this.cam.turn(-(e.clientX - d.x) * 0.006);
       // tilt: raise or lower the camera a touch, clamped so you never end up under the ground
       const tilt = -(e.clientY - d.y) * 0.02;
       this.cam.o.offset.y = clamp(this.cam.o.offset.y + tilt, 4.5, 20);
@@ -661,8 +663,9 @@ export class Game {
     if (code === 'KeyL') this.toggleLoad();
     if (code === 'KeyH' && !this.tutorialOn) this.beginTutorial();
     if (code === 'KeyR' && this.orbitDrag === null) {
-      // put the camera back where it belongs
-      this.cam.orbit = 0;
+      // put the camera back behind whatever you're driving (or facing north on foot), instantly
+      this.cam.autoTarget = null;
+      this.cam.snapAngle(this.mounted !== null ? this.active.yaw : 0);
       this.cam.o.offset.y = this.mounted === 'rig' ? 16.5 : this.mounted === 'mower' ? 13.2 : 8.4;
       this.cam.o.offset.z = this.mounted === 'rig' ? 9.0 : this.mounted === 'mower' ? 7.0 : 4.9;
     }
@@ -775,6 +778,7 @@ export class Game {
    */
   private updateFuelArrow(dt: number, t: number) {
     const low = this.fuel / Math.max(1, this.fuelMax) < 0.2;
+    // where you'd actually take the machine: the tank sits in the mower, not in your boots
     const atPump = this.nearestPump().d < PUMP_R + 1;
     const show = low && this.canFuel <= 0.5 && !atPump && !this.refueling &&
       this.phase !== 'title' && this.phase !== 'evening' && this.phase !== 'paused' && this.phase !== 'schedule';
@@ -984,11 +988,22 @@ export class Game {
     cam.lookAt(44, 0, 0);
   }
 
+  /**
+   * Keys are screen-relative: "up" always means away from the camera. The stick is turned by the
+   * camera's yaw each frame, so the chase view and a hand-orbited view both steer true.
+   */
+  private stick() {
+    const raw = this.controls.read();
+    if (raw.m < 0.02) return { ...raw, x: 0, z: 0 };
+    const c = Math.cos(this.cam.angle), s = Math.sin(this.cam.angle);
+    return { ...raw, x: raw.x * c + raw.z * s, z: -raw.x * s + raw.z * c };
+  }
+
   private play(dt: number, t: number) {
     this.hour += dt / SEC_PER_HOUR;
     if (this.hour >= DAY_END) { this.hour = DAY_END; this.endDay(); return; }
 
-    const inp = this.controls.read();
+    const inp = this.stick();
     const m = this.active;
     this.boost = this.mounted === 'mower' && inp.boost && inp.m > 0.1;
     // rain makes the grass slick: slower to grip, slower to stop (better tyres help)
@@ -1046,11 +1061,19 @@ export class Game {
     else if (this.mounted === 'rig') this.sfx.drone(0.3 + frac * 0.35, frac * 1.1);
     else this.sfx.drone(0, 0);
 
-    // with equipment running, sit the camera behind the player like a chase cam; on foot keep the
-    // familiar top-down view so you can see where you're walking
-    const wantBehind = this.mounted === null ? 0 : 1;
-    this.cam.behind += (wantBehind - this.cam.behind) * Math.min(1, dt * 2.2);
-    this.cam.heading = m.yaw;
+    // The view is camera-relative driving's reference, so it must never turn while you drive: a view
+    // that chases your heading makes "up" mean something new every frame, and a held turn spirals
+    // (that was the "controls go crazy" bug). So it holds perfectly still while you're moving, and
+    // while you're stopped it slowly settles in behind you — where you can see it happen and where
+    // nothing can feed back into your steering.
+    const atRest = m.speed < 0.6 && inp.m < 0.05 && this.mounted !== null;
+    if (atRest && this.orbitDrag === null && this.phase === 'play') {
+      this.idleT += dt;
+      if (this.idleT > 1.2) this.cam.autoTarget = m.yaw;
+    } else {
+      this.idleT = 0;
+      this.cam.autoTarget = null;
+    }
     this.cam.update(dt, m.x, m.z, m.vx, m.vz, this.boost);
     // a bigger vehicle wants a wider view: ease into the new distance when you change what you're
     // driving, then leave the camera alone so a hand-tilted view stays where you put it
@@ -1152,7 +1175,7 @@ export class Game {
     this.squash.reset();
     this.squash.jump(2.6);
     this.sfx.dismount();
-    this.cam.snap(this.feet.x, this.feet.z);
+    this.cam.snap(this.feet.x, this.feet.z, this.feet.yaw);
     this.popups.spawn('on foot', seat.x, 1.6, seat.z, '#e8f4ff', 0.9, 0.8);
     if (!this.walkHinted) {
       this.walkHinted = true;
@@ -1182,12 +1205,12 @@ export class Game {
       this.mounted = 'rig';
       // drop the trailer behind wherever the truck was left
       this.startRig();
-      this.cam.snap(this.rigMover.x, this.rigMover.z);
+      this.cam.snap(this.rigMover.x, this.rigMover.z, this.rigMover.yaw);
       this.tutorialFire('rig');
     } else {
       this.mounted = 'mower';
       this.mover.place(this.mowerPark.x, this.mowerPark.z, this.mowerPark.yaw);
-      this.cam.snap(this.mover.x, this.mover.z);
+      this.cam.snap(this.mover.x, this.mover.z, this.mover.yaw);
       this.tutorialFire('mower');
     }
   }
@@ -1267,7 +1290,7 @@ export class Game {
       this.blades = false;
       this.sfx.dismount();
       this.hud.toast('🚜 Mower is down the ramps. Press B to spin the blades up.', 'good', 3000);
-      this.cam.snap(bx, bz);
+      this.cam.snap(bx, bz, this.trailer.yaw);
     }
   }
 
@@ -1666,9 +1689,19 @@ export class Game {
   }
 
   // ---------------------------------------------------------------- fuel
+  /**
+   * The machine whose tank you're filling. On foot that's the mower (or the rig if the mower is
+   * strapped to it) — not wherever you happen to be standing.
+   */
+  private fuelAnchor() {
+    if (this.mounted === 'rig') return this.rigMover;
+    if (this.mounted === 'mower') return this.mover;
+    return this.mowerLoaded ? this.rigMover : this.mowerPark;
+  }
+
   private nearestPump() {
     let best = this.world.streets[0].pump, bd = Infinity;
-    const p = this.active;
+    const p = this.fuelAnchor();
     for (const s of this.world.streets) {
       if (!s.unlocked) continue;
       const d = Math.hypot(p.x - s.pump.x, p.z - s.pump.z);
@@ -1815,11 +1848,11 @@ export class Game {
     }
     if (this.mounted === 'rig') {
       this.parkRigAt(pump.x + 0.2, pump.z + 4, Math.PI / 2);
-      this.cam.snap(this.rigMover.x, this.rigMover.z);
+      this.cam.snap(this.rigMover.x, this.rigMover.z, this.rigMover.yaw);
     } else {
       m.place(pump.x + 0.2, pump.z, Math.PI / 2);
       this.mowerPark = { x: m.x, z: m.z, yaw: m.yaw };
-      this.cam.snap(m.x, m.z);
+      this.cam.snap(m.x, m.z, m.yaw);
     }
     this.squash.jump(3);
     this.phase = 'play';

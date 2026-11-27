@@ -231,7 +231,7 @@ export class Hud {
         <li>Load the mower on the trailer and drive the pickup to a far street — <b class="key">L</b> winches it on · <b class="key">T</b> swaps gear at the trailer</li>
         <li>Rung down? Knock again and <b>haggle</b> — cheaper rate, or drop a service they don't need</li>
       </ul>
-      <div class="controls">WASD / arrows to drive · Shift full throttle · E mount/dismount · B blades · F use a tool · L load the mower · T trailer · G spare can · middle-drag to look around · R recentre · C schedule · Esc pause · M mute</div>`);
+      <div class="controls">WASD / arrows to drive (relative to the camera) · Shift full throttle · E mount/dismount · B blades · F use a tool · L load the mower · T trailer · G spare can · middle-drag to orbit, R to snap behind · C schedule · Esc pause · M mute</div>`);
     const opts: DialogOption[] = [];
     if (hasSave) opts.push({ label: 'Continue', key: '⏎', primary: true, onPick: onContinue });
     opts.push({ label: hasSave ? 'New business' : 'Start mowing', key: hasSave ? 'N' : '⏎', primary: !hasSave, onPick: onNew });
@@ -254,8 +254,8 @@ export class Hud {
       ['L', 'Winch the mower on, or roll it off the trailer'],
       ['T', 'Trailer menu: swap tools'],
       ['G', 'Pour the spare fuel can'],
-      ['Middle-drag', 'Orbit the camera (Shift+drag also works)'],
-      ['R', 'Recentre the camera'],
+      ['Middle-drag', 'Orbit the camera (Shift+drag also works). It holds still while you drive and settles behind you when you stop.'],
+      ['R', 'Snap the camera in behind you'],
       ['C', 'Schedule'],
       ['H', 'Replay the tutorial'],
       ['Esc', 'Pause · M mutes'],
