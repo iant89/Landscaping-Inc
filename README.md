@@ -9,6 +9,9 @@ neighbourhood, knock on doors, win customers, keep to their schedules and keep t
   cuts a week (1–3, on set weekdays) and which services (mowing always, plus 🍂 leaf clearing,
   📏 edging and ✂️ hedge trimming for some). The offer shows how busy those days already are. Pitch
   full price or offer a discount to raise your odds. The discounted price is what they'll pay every visit.
+- **Haggle** if they turn you down. Knock again (they'll still answer the second time) and you can drop a
+  service they don't need, cut the weekly visits, or waive the first visit for $10. Push too often and
+  they'll shut the door for the day.
 - **Trial visit:** get hired and you do a trial visit that day, before the deadline. Finish it and they
   become a regular, booked on their days.
 - **The schedule** (📅 button or C) shows the week: who's booked each day, what's done ✓ and what was
@@ -19,18 +22,26 @@ neighbourhood, knock on doors, win customers, keep to their schedules and keep t
 - **Edging** means driving the borders where grass creeps over the paving. **Hedges** are trimmed by
   brushing along them, and they grow shaggy again after about a week.
 - **Weather** comes with a 4-day forecast. Rain makes the mower slide (Turf Tires help) and makes grass
-  shoot up. Wind keeps blowing leaves onto driveways.
+  shoot up. Wind keeps blowing leaves onto driveways, and drifts of leaves lift off, tumble through the
+  air and settle somewhere new.
 - **Green Giant Lawns** shows up from day 3. Their blue mower heads for one of your prospects; get
   hired there first and they turn back. They also poach customers you let down.
 - **Crew** (from the evening shop) drive their own mowers to your booked lawns and mow them. They
   cost a hire fee plus a daily wage.
 - **More streets:** Oak Avenue opens at 3 regulars and ★3.5, Birch Lane at 7 regulars and ★4.0.
   Each street has a gas station at its west end. Get there via the cross road at the east end.
+- **Fuel** runs the engine, not the wheels alone. Idling sips, driving drinks, and the deck costs extra:
+  spin the blades off (**B**) when you're moving between lawns and you'll go much further on a tank.
+- **Walk it** (**E**) when you're heading to a door. With the mower parked and the deck off you barely use
+  any fuel at all, and you can walk right up to the porch. Press **E** again next to the mower to climb on.
+- **The spare can** holds half a tank and rides on the back. If you run dry, press **G** to pour it in
+  (parked, or standing next to the mower) instead of paying for a tow. It refills for free at a pump.
 - Finishing early earns a tip. Squashed flowers and gnomes you've hit come out of your pay. Run out of
-  gas and you'll be towed for $25.
+  gas with an empty can and you'll be towed for $25.
 
-Controls: WASD / arrow keys to drive, Shift for full throttle, C for the schedule, Esc to pause, M to mute. On touch screens,
-drag anywhere to steer and hold ⚡ for full throttle.
+Controls: WASD / arrow keys to drive, Shift for full throttle, E to hop off / climb on, B for the blades,
+G to pour the spare can, C for the schedule, Esc to pause, M to mute. On touch screens, drag anywhere to
+steer and hold ⚡ for full throttle.
 
 ## Development
 
@@ -51,8 +62,10 @@ repository settings under **Pages → Source: GitHub Actions**.
 | `src/npc.ts` | AI mowers (crew and rival): route planning along the roads and lane-by-lane mowing of a lot |
 | `src/weather.ts` | Weather types, the forecast roll, and rain effects |
 | `src/world.ts` | Builds the three streets: lots, houses, hedges, trees, truck, gas stations, barriers, collision boxes, and a grid classifying every 0.5 m cell as lawn / flower bed / paving / edge |
-| `src/lawn.ts` | Instanced grass tufts that grow and get cut, edge creep, mow stripes painted into per-street ground textures, flowers, leaves |
-| `src/mower.ts` | The riding mower model |
+| `src/lawn.ts` | Instanced grass tufts that grow and get cut, edge creep, mow stripes painted into per-street ground textures, flower clusters, and leaves with real air physics |
+| `src/mower.ts` | The riding mower model: wheels, deck, blades, exhaust and dashboard light |
+| `src/avatar.ts` | The on-foot gardener (walk cycle) and the spare fuel can |
+| `src/textures.ts` | Procedural canvas textures: siding, shingles, paving, asphalt, brick, timber, turf |
 | `src/hud.ts`, `src/style.css` | DOM HUD, dialogs, end-of-day shop |
 | `src/sfx.ts` | Sound effects (procedural, no audio files) |
 | `src/config.ts` | Layout constants, day length, prices, upgrades |

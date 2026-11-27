@@ -1,13 +1,14 @@
 import * as THREE from 'three';
 import { Engine, FollowCamera, Input, Mover, Particles, Popups, Squash, TouchStick, clamp, poseBody } from '../engine/src';
 import {
-  CELL, CROSS_MID, DAY_END, DAY_START, FUEL_PRICE, GH, GW, HELPER_COST, HELPER_NAMES, HELPER_WAGE, K_BED, K_LAWN,
-  MAX_STRIKES, MAX_X, MAX_Z, MIN_X, MIN_Z, PUMP, PUMP_R, SEC_PER_HOUR, STREETS, TOW_FEE, UPGRADES, UpKey, WEEKDAYS,
-  WEEKDAYS_LONG, cellX, cellZ, fmtHour, streetZ,
+  BURN, CAN_FRACTION, CAN_POUR_TIME, CELL, CROSS_MID, DAY_END, DAY_START, FUEL_PRICE, GH, GW, HELPER_COST, HELPER_NAMES,
+  HELPER_WAGE, K_BED, K_LAWN, MAX_STRIKES, MAX_X, MAX_Z, MIN_X, MIN_Z, PUMP, PUMP_R, SEC_PER_HOUR, STREETS, TOW_FEE,
+  UPGRADES, UpKey, WEEKDAYS, WEEKDAYS_LONG, cellX, cellZ, fmtHour, streetZ,
 } from './config';
-import { Flowers, Grass, Leaves } from './lawn';
+import { Flowers, Grass, Leaf, Leaves } from './lawn';
 import { CREW_COLORS, MowerModel, RIVAL_COLORS, animateMower, buildMower } from './mower';
-import { Hud, JobLine, ScheduleCell, ScheduleData } from './hud';
+import { WalkerModel, animateWalker, buildFuelCan, buildWalker } from './avatar';
+import { DialogOption, Hud, JobLine, ScheduleCell, ScheduleData } from './hud';
 import { Npc, leaveLot, mowPlan, routeTo } from './npc';
 import { Sfx } from './sfx';
 import { Rain, WEATHER, Weather, rollWeather } from './weather';
@@ -42,6 +43,12 @@ interface LotState {
   edgeCut: number;
   /** Today's offer, so knocking twice shows the same terms. */
   offer: Offer | null;
+  /** How many times they've turned you down today; 3 and they're done. */
+  tries: number;
+  /** Times you've talked about money today (used for the grumpier line). */
+  asked: number;
+  /** You waived the first visit to soften them up. */
+  sweetened: boolean;
   /** Crew member working this lot today, or -1. */
   crew: number;
 }
@@ -50,12 +57,14 @@ interface Crew { npc: Npc; name: string; lot: number }
 interface Gnome { obj: THREE.Group; hx: number; hz: number; x: number; z: number; vx: number; vz: number; spin: number; tip: number; knocked: boolean; lot: number }
 
 interface SaveFile {
-  v: 2; money: number; rep: number; day: number; fuel: number; up: Record<UpKey, number>;
+  v: 3; money: number; rep: number; day: number; fuel: number; up: Record<UpKey, number>;
   crew: number; streets: number; forecast: Weather[]; week: Record<string, 'done' | 'missed'>;
   hedges: number[];
+  /** fuel left in the spare can (fraction of a full tank), and whether the blades are engaged. */
+  can: number;
   lots: Pick<LotState, 'status' | 'grumpy' | 'pay' | 'days' | 'services' | 'strikes' | 'good' | 'rivalDays' | 'level'>[];
 }
-const SAVE_KEY = 'li_save_v2';
+const SAVE_KEY = 'li_save_v3';
 const RIVAL = 'Green Giant Lawns';
 const RIVAL_HOME = { x: CROSS_MID + 1.8, z: 14 };
 
@@ -85,9 +94,32 @@ export class Game {
   hud: Hud;
   clips: Particles;
   sparks: Particles;
+  smoke: Particles;
   rain: Rain;
   markers: THREE.Sprite[] = [];
   private markerTex: Record<string, THREE.Texture> = {};
+
+  // --- on foot
+  walker: WalkerModel;
+  /** The player's own mover: drives the mower when riding, walks when on foot. */
+  feet = new Mover({ radius: 0.42, maxSpeed: 3.9, accel: 14, decel: 11, turnRate: 12 });
+  riding = true;
+  /** Where the mower is parked, so you can climb back on. */
+  mowerPark = { x: 0, z: 0, yaw: 0 };
+  /** The spare can's model, carried or left by the mower. */
+  canModel: THREE.Group;
+  /** Fuel left in the spare can, in the same units as the tank. */
+  canFuel = 0;
+  /** > 0 while pouring the can into the tank. */
+  pouring = 0;
+  /** Blades are engaged: cutting grass costs extra fuel, disengaged saves it. */
+  blades = true;
+  private walkHinted = false;
+  private bladeHinted = false;
+  private walkT = 0;
+  private deckT = 0;
+  private puffT = 0;
+  private canHinted = false;
   gnomes: Gnome[] = [];
   crew: Crew[] = [];
   rival: { npc: Npc; target: number; active: boolean };
@@ -153,9 +185,16 @@ export class Game {
     this.leaves = new Leaves(this.world);
     this.clips = this.engine.addParticles(1200, false);
     this.sparks = this.engine.addParticles(700, true);
+    this.smoke = this.engine.addParticles(400, false);
     this.rain = new Rain(this.world.scene);
     this.model = buildMower();
     this.world.scene.add(this.model.root);
+    this.walker = buildWalker();
+    this.walker.root.visible = false;
+    this.world.scene.add(this.walker.root);
+    this.canModel = buildFuelCan();
+    this.canModel.visible = false;
+    this.world.scene.add(this.canModel);
     this.cam = new FollowCamera(this.engine.camera, { offset: new THREE.Vector3(0, 14.5, 7.5), boostFov: 6 }, this.engine.syncProjection);
     this.controls = new Input({ capture: () => this.phase === 'play', onKey: this.onKey });
     new TouchStick(container, this.controls);
@@ -178,7 +217,7 @@ export class Game {
     return {
       status: 'prospect', deadline: DAY_END, pay: 0, days: [], services: noServices(), doneToday: false,
       grumpy: Math.random() * 0.6, strikes: 0, good: 0, rivalDays: 0, level: 0.7 + Math.random() * 0.3,
-      flowers: 0, gnome: false, cut: 0, edgeCut: 0, offer: null, crew: -1,
+      flowers: 0, gnome: false, cut: 0, edgeCut: 0, offer: null, tries: 0, asked: 0, sweetened: false, crew: -1,
     };
   }
 
@@ -197,6 +236,8 @@ export class Game {
   private newGame() {
     this.sfx.unlock();
     this.money = 30; this.rep = 3; this.day = 1; this.up = freshUp(); this.fuel = this.fuelMax;
+    this.canFuel = this.fuelMax * CAN_FRACTION;
+    this.blades = true;
     this.lots = this.world.lots.map(() => this.freshLot());
     this.week = {};
     this.forecast = ['sunny', rollWeather('sunny'), rollWeather(null), rollWeather(null)];
@@ -214,6 +255,7 @@ export class Game {
     this.sfx.unlock();
     this.money = s.money; this.rep = s.rep; this.day = s.day; this.up = { ...freshUp(), ...s.up };
     this.fuel = Math.min(this.fuelMax, s.fuel);
+    this.canFuel = s.can === undefined ? this.fuelMax * CAN_FRACTION : s.can * this.fuelMax;
     this.lots = this.world.lots.map((_, i) => ({ ...this.freshLot(), ...(s.lots[i] ?? {}) }));
     this.forecast = [...s.forecast, 'sunny', 'cloudy', 'sunny', 'sunny'].slice(0, 4) as Weather[];
     this.week = s.week ?? {};
@@ -250,7 +292,7 @@ export class Game {
     let booked = 0;
     this.lots.forEach((st) => {
       if (st.status === 'declined' || st.status === 'job') st.status = 'prospect';
-      st.doneToday = false; st.flowers = 0; st.gnome = false; st.cut = 0; st.edgeCut = 0; st.offer = null; st.crew = -1;
+      st.doneToday = false; st.flowers = 0; st.gnome = false; st.cut = 0; st.edgeCut = 0; st.offer = null; st.crew = -1; st.tries = 0; st.asked = 0; st.sweetened = false;
       st.deadline = DAY_END;
       if (this.isDue(st)) booked++;
     });
@@ -365,7 +407,7 @@ export class Game {
       schedule: this.scheduleData(), unlock: this.unlockLine(), up: this.up,
       crew: { count: this.crew.length, max: HELPER_COST.length, cost: HELPER_COST[this.crew.length] ?? null, wage: HELPER_WAGE },
       onBuy: (k) => this.buy(k),
-      onHire: () => this.hire(),
+      onHire: () => this.hireCrew(),
       onNext: () => this.startDay(),
       nextLabel: `Start ${WEEKDAYS_LONG[this.weekday]}`,
     });
@@ -384,7 +426,7 @@ export class Game {
     this.showEvening();
   }
 
-  private hire() {
+  private hireCrew() {
     const cost = HELPER_COST[this.crew.length];
     if (cost === undefined || this.money < cost) { this.sfx.deny(); return; }
     this.money -= cost;
@@ -438,14 +480,20 @@ export class Game {
     if (code === 'KeyM') this.sfx.setMuted(!this.sfx.muted);
     if (code === 'KeyC' || code === 'Tab') { e.preventDefault(); this.toggleSchedule(); }
     if (this.phase === 'play' && (code === 'Escape' || code === 'KeyP')) this.pause();
+    if (this.phase !== 'play') return;
+    if (code === 'KeyE') this.riding ? this.dismount() : this.mount();
+    if (code === 'KeyB' && this.riding) this.toggleBlades();
+    if (code === 'KeyG') this.startPour();
   };
 
   // ================================================================ save
   private save() {
+    try { localStorage.removeItem('li_save_v2'); } catch { /* storage blocked */ }
     const s: SaveFile = {
-      v: 2, money: this.money, rep: this.rep, day: this.day, fuel: this.fuel, up: this.up,
+      v: 3, money: this.money, rep: this.rep, day: this.day, fuel: this.fuel, up: this.up,
       crew: this.crew.length, streets: this.world.streets.filter((x) => x.unlocked).length,
       forecast: this.forecast, week: this.week, hedges: this.world.hedges.map((h) => (h.shaggy ? 0 : h.regrow)),
+      can: this.canFuel / Math.max(1, this.fuelMax),
       lots: this.lots.map((l) => ({
         status: l.status === 'job' || l.status === 'declined' ? 'prospect' : l.status,
         grumpy: l.grumpy, pay: l.pay, days: l.days, services: l.services, strikes: l.strikes, good: l.good, rivalDays: l.rivalDays, level: l.level,
@@ -456,10 +504,18 @@ export class Game {
 
   private readSave(): SaveFile | null {
     try {
-      const s = JSON.parse(localStorage.getItem(SAVE_KEY) ?? 'null') as SaveFile | null;
-      return s && s.v === 2 ? s : null;
+      const key = localStorage.getItem(SAVE_KEY) ? SAVE_KEY : 'li_save_v2';
+      const raw = JSON.parse(localStorage.getItem(key) ?? 'null') as (SaveFile & { v: number }) | null;
+      if (!raw || (raw.v !== 3 && raw.v !== 2)) return null;
+      // older saves predate the spare can: top it up
+      if (raw.can === undefined) raw.can = CAN_FRACTION;
+      raw.v = 3;
+      return raw;
     } catch { return null; }
   }
+
+  /** The mover you're controlling right now: the mower when riding, your feet when walking. */
+  get active() { return this.riding ? this.mover : this.feet; }
 
   // ================================================================ frame
   private frame = (dt: number, t: number) => {
@@ -468,13 +524,33 @@ export class Game {
     switch (this.phase) {
       case 'title': this.updateTitle(dt); break;
       case 'play': this.play(dt, t); break;
-      case 'dialog': this.mover.vx *= 0.8; this.mover.vz *= 0.8; this.cam.update(dt, this.mover.x, this.mover.z); break;
+      case 'dialog': { const a = this.active; a.vx *= 0.8; a.vz *= 0.8; this.cam.update(dt, a.x, a.z); break; }
       case 'tow': this.updateTow(dt); break;
       default: break;
     }
     if (live) this.squash.update(dt);
-    poseBody(this.model.root, this.model.body, this.mover, this.squash);
-    animateMower(this.model, this.mover.yaw, this.mover.vx, this.mover.vz, dt, t, live && this.phase !== 'tow');
+    // the mower sits where it was parked while you walk
+    if (this.riding) {
+      poseBody(this.model.root, this.model.body, this.mover, this.squash);
+      animateMower(this.model, this.mover.yaw, this.mover.vx, this.mover.vz, dt, t, live && this.phase !== 'tow', this.blades);
+    } else {
+      this.model.root.position.set(this.mowerPark.x, 0, this.mowerPark.z);
+      this.model.root.rotation.y = this.mowerPark.yaw;
+      this.model.body.position.y = 0;
+      if (this.blades && live) this.model.blade.rotation.y += dt * 6;
+      const lamp = this.model.bladeLamp.material as THREE.MeshStandardMaterial;
+      lamp.color.set(this.blades ? '#7dff9a' : '#5a2b2b');
+      lamp.emissive.set(this.blades ? '#7dff9a' : '#3a1414');
+      lamp.emissiveIntensity = this.blades ? 0.8 : 0.3;
+    }
+    {
+      const w = this.walker;
+      w.root.visible = !this.riding;
+      if (!this.riding) {
+        poseBody(w.root, w.body, this.feet, this.squash);
+        animateWalker(w, dt, this.feet.speed, this.phase === 'play', t);
+      }
+    }
     if (this.phase !== 'play') {
       for (const c of this.crew) c.npc.update(0, this.world, t);
       this.rival.npc.update(0, this.world, t);
@@ -484,9 +560,17 @@ export class Game {
     this.updateMarkers(t);
     this.updateFades(dt);
     this.updateLighting();
-    this.leaves.update(dt, t, this.wx.wind);
+    this.leaves.update(dt, t, this.wx.wind, this.onLeafLand);
+    if (this.phase === 'play') this.refillCanAtPump(dt);
+    this.canModel.visible = this.canFuel > 0.02;
+    if (this.canModel.visible) {
+      if (this.riding) { this.canModel.position.set(this.mover.x + 0.62, 0.72, this.mover.z - 0.4); this.canModel.rotation.y = this.mover.yaw; }
+      else { this.canModel.position.set(this.feet.x - 0.24, 0.35, this.feet.z); this.canModel.rotation.y = this.feet.yaw + Math.PI; }
+    }
     this.clips.update(dt, this.mover.x, 0.4, this.mover.z);
     this.sparks.update(dt, this.mover.x, 0.4, this.mover.z);
+    this.smoke.update(dt, this.mover.x, 0.9, this.mover.z);
+    this.exhaustPuffs(dt);
     this.popups.update(dt, this.engine.camera);
     this.texT -= dt;
     if (this.texT <= 0) { this.texT = 0.1; this.grass.flush(); }
@@ -494,6 +578,14 @@ export class Game {
     if (this.hudT <= 0 && live) { this.hudT = 0.1; this.pushHud(); }
     this.mapT -= dt;
     if (this.mapT <= 0) { this.mapT = 0.2; this.drawMinimap(); }
+  };
+
+  /** A leaf just landed: a tiny puff of dust, and the lot it fell on gets it back. */
+  private onLeafLand = (l: Leaf) => {
+    if (Math.random() < 0.25) this.clips.spawn(l.x, 0.06, l.z, (Math.random() - 0.5) * 0.8, 0.4, (Math.random() - 0.5) * 0.8, 0.55, 0.35, 0.16, 0.06, 0.35, 9);
+    const c = this.cellAt(l.x, l.z);
+    const o = c >= 0 ? this.world.owner[c] : -1;
+    if (o >= 0) l.lot = o; else l.alive = false;
   };
 
   private updateTitle(dt: number) {
@@ -509,23 +601,31 @@ export class Game {
     if (this.hour >= DAY_END) { this.hour = DAY_END; this.endDay(); return; }
 
     const inp = this.controls.read();
-    this.boost = inp.boost && inp.m > 0.1;
-    const m = this.mover;
+    this.boost = this.riding && inp.boost && inp.m > 0.1;
+    const m = this.active;
     // rain makes the grass slick: slower to grip, slower to stop (better tyres help)
-    const grip = this.today === 'rain' ? 0.42 + 0.17 * this.up.tires : 1;
-    m.o.maxSpeed = this.speedMax;
-    m.o.accel = 10 * grip;
-    m.o.decel = 7 * grip;
-    m.o.turnRate = 10 * (0.55 + 0.45 * grip);
+    const grip = this.riding && this.today === 'rain' ? 0.42 + 0.17 * this.up.tires : 1;
+    if (this.riding) {
+      m.o.maxSpeed = this.speedMax;
+      m.o.accel = 10 * grip;
+      m.o.decel = 7 * grip;
+      m.o.turnRate = 10 * (0.55 + 0.45 * grip);
+    }
     const hit = m.update(dt, inp.x, inp.z, inp.m, this.world, this.boost ? 1.35 : 1);
     this.bumpCd -= dt;
     if (hit.impact > 2.4 && this.bumpCd <= 0) this.bump(hit.impact, hit.nx, hit.nz);
-    const frac = Math.min(1, m.speed / this.speedMax);
+    const frac = Math.min(1, m.speed / (this.riding ? this.speedMax : this.feet.o.maxSpeed));
 
-    const cutNow = this.cutAround(dt);
-    this.squashFlowers();
-    this.vacuumLeaves(dt);
-    this.trimHedges();
+    let cutNow = 0;
+    if (this.riding) {
+      cutNow = this.blades ? this.cutAround(dt) : this.idleDeck(dt);
+      if (this.blades) this.deckBlast(dt); else this.pushLeaves(dt);
+      this.squashFlowers();
+      this.vacuumLeaves(dt);
+      if (this.blades) this.trimHedges();
+    } else {
+      this.walkAbout(dt);
+    }
     this.updateNpcs(dt, t);
     this.updateFuel(dt, frac, cutNow);
     if (this.phase !== 'play') return;
@@ -536,8 +636,120 @@ export class Game {
     this.checkT -= dt;
     if (this.checkT <= 0) { this.checkT = 0.2; this.checkJobs(); }
 
-    this.sfx.drone(0.45 + frac * 0.4 + Math.min(0.3, cutNow * 0.05), frac * (this.boost ? 1.3 : 1) + Math.min(0.5, cutNow * 0.06));
+    if (this.riding) this.sfx.drone(0.45 + frac * 0.4 + Math.min(0.3, cutNow * 0.05), frac * (this.boost ? 1.3 : 1) + Math.min(0.5, cutNow * 0.06));
+    else this.sfx.drone(0, 0);
     this.cam.update(dt, m.x, m.z, m.vx, m.vz, this.boost);
+  }
+
+  // ---------------------------------------------------------------- on foot
+  /** Rough walking: brush the hedges and kick up any leaves you scuff through. */
+  /** A wisp of exhaust from the pipe while the engine runs: grey, drifting up and back. */
+  private exhaustPuffs(dt: number) {
+    const running = this.riding || this.blades;
+    if (!running) return;
+    this.puffT -= dt;
+    if (this.puffT > 0) return;
+    this.puffT = 0.1 + Math.random() * 0.1;
+    const m = this.mover;
+    const p = this.model.pipeTip;
+    // particle space is world space: the mower model sits at the mover's x/z
+    const x = m.x + p.x, y = p.y + 0.25, z = m.z + p.z;
+    const k = this.riding ? 0.5 : 0.75;
+    this.smoke.spawn(x, y, z, (Math.random() - 0.5) * 0.3, 0.55 + Math.random() * 0.35, (Math.random() - 0.5) * 0.3,
+      0.55 * k, 0.55 * k, 0.58 * k, 0.5 + Math.random() * 0.4, 0.55, 0);
+  }
+
+  private walkAbout(dt: number) {
+    const f = this.feet;
+    if (f.speed > 0.6) {
+      this.leaves.gust(f.x, f.z, 0.55, 1.5, 0.7);
+      this.squashFlowers();
+      this.walkT -= dt;
+      if (this.walkT <= 0) { this.walkT = 0.34; this.sfx.walk(Math.min(3, Math.floor(f.speed))); }
+    }
+    // the deck blast: leaves near the parked mower lift and tumble while the blades spin
+    if (this.blades) {
+      this.deckT -= dt;
+      if (this.deckT <= 0) { this.deckT = 0.2; this.leaves.gust(this.mowerPark.x, this.mowerPark.z, 1.6, 1.2, 1.6); }
+    }
+    void dt;
+  }
+
+  /** Aim the deck at what is under it without turning the blade: pushes leaves around. */
+  private idleDeck(dt: number) {
+    const m = this.mover;
+    const n = this.leaves.gust(m.x, m.z, 1.5, 0.9, 1.1);
+    if (n > 0 && Math.random() < 0.3) this.sfx.leaf();
+    void dt;
+    return 0;
+  }
+
+  /** With the blades off the deck still shoves leaves along the grass at low speed. */
+  private pushLeaves(dt: number) {
+    const m = this.mover;
+    if (m.speed < 0.3) return;
+    this.deckT -= dt;
+    if (this.deckT > 0) return;
+    this.deckT = 0.12;
+    this.leaves.gust(m.x, m.z, 1.3, 0.5, 1.0);
+  }
+
+  /** Dismount: park the mower where it stands and step off to the side. */
+  dismount() {
+    if (!this.riding || this.phase !== 'play') return;
+    const m = this.mover;
+    if (m.speed > 1.6) { this.hud.toast('Slow down before hopping off!', 'bad', 1800); return; }
+    this.mowerPark = { x: m.x, z: m.z, yaw: m.yaw };
+    const wasBlades = this.blades;
+    this.blades = false;
+    // step out to the mower's left, or right if that side is blocked
+    const rx = Math.cos(m.yaw), rz = -Math.sin(m.yaw);
+    const R = this.mover.o.radius + this.feet.o.radius + 0.15;
+    this.riding = false;
+    this.feet.place(m.x + rx * R, m.z + rz * R, m.yaw);
+    this.feet.collide(this.world);
+    this.squash.reset();
+    this.squash.jump(2.6);
+    this.sfx.dismount();
+    this.cam.snap(this.feet.x, this.feet.z);
+    this.popups.spawn('on foot', m.x, 1.6, m.z, '#e8f4ff', 0.9, 0.8);
+    if (!this.walkHinted) {
+      this.walkHinted = true;
+      this.hud.toast('🚶 On foot. The mower idles but only sips fuel. Walk up to a door and knock. Press E to climb back on.', 'info', 4600);
+    }
+    if (wasBlades) {
+      this.sfx.blade(false);
+      this.hud.toast('🛑 Blades stopped so it is safe to walk around. Press B when you are back on.', 'info', 3600);
+    }
+  }
+
+  /** Climb back on, if you're standing close enough. */
+  mount() {
+    if (this.riding || this.phase !== 'play') return;
+    const p = this.mowerPark;
+    const d = Math.hypot(this.feet.x - p.x, this.feet.z - p.z);
+    if (d > 2.2) { this.hud.toast('Walk back to the mower and press E to climb on.', 'info', 2000); return; }
+    this.riding = true;
+    this.mover.place(p.x, p.z, p.yaw);
+    this.squash.reset();
+    this.squash.jump(2.2);
+    this.sfx.mount();
+    this.cam.snap(this.mover.x, this.mover.z);
+  }
+
+  /** Leaving the mower also means it can't cut: that's the trade for saving fuel. */
+  private toggleBlades() {
+    this.blades = !this.blades;
+    this.sfx.blade(this.blades);
+    if (this.blades) {
+      this.popups.spawn('BLADES ON', this.mover.x, 1.9, this.mover.z, '#9dffb0', 0.9, 0.9);
+    } else {
+      this.popups.spawn('BLADES OFF', this.mover.x, 1.9, this.mover.z, '#ffd23a', 0.9, 0.9);
+      if (!this.bladeHinted) {
+        this.bladeHinted = true;
+        this.hud.toast('🛑 Blades off: no cutting, but the engine burns less fuel. Press B to spin them up again.', 'info', 4200);
+      }
+    }
   }
 
   private cellAt(x: number, z: number) {
@@ -563,6 +775,17 @@ export class Game {
     return n;
   }
 
+  /** The spinning deck throws nearby leaves into the air; they tumble and land somewhere new. */
+  private deckBlast(dt: number) {
+    const m = this.mover;
+    if (m.speed < 0.4) return;
+    this.deckT -= dt;
+    if (this.deckT > 0) return;
+    this.deckT = 0.07;
+    const n = this.leaves.gust(m.x, m.z, 2.1, 4.2 + m.speed * 0.5, 3.0 + m.speed * 0.45);
+    if (n > 0) this.sfx.leaf();
+  }
+
   private cutAround(dt: number) {
     const m = this.mover;
     const fx = Math.sin(m.yaw), fz = Math.cos(m.yaw);
@@ -583,7 +806,7 @@ export class Game {
   }
 
   private squashFlowers() {
-    const m = this.mover;
+    const m = this.active;
     for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
       const c = this.cellAt(m.x + dx * 0.55, m.z + dz * 0.55);
       if (c < 0 || this.world.kind[c] !== K_BED) continue;
@@ -653,7 +876,7 @@ export class Game {
     }
     this.npcStep(this.rival.npc, dt, t);
     // nobody drives through anybody
-    const all = [this.mover, ...this.crew.map((c) => c.npc.mover), this.rival.npc.mover];
+    const all = [this.active, ...this.crew.map((c) => c.npc.mover), this.rival.npc.mover];
     this.npcBumpCd -= dt;
     for (let a = 0; a < all.length; a++) for (let b = a + 1; b < all.length; b++) {
       const imp = separate(all[a], all[b]);
@@ -763,9 +986,24 @@ export class Game {
     return { pump: best, d: bd };
   }
 
+  /**
+   * Fuel burn. Idling sips, driving costs more, the blades cost extra, and mowing in long grass
+   * costs a little more again. Walking to the door with the mower parked and the blades off is by
+   * far the cheapest way to get around.
+   */
   private updateFuel(dt: number, frac: number, cutNow: number) {
-    this.fuel -= (0.25 + frac * (this.boost ? 1.7 : 0.95) + (cutNow ? 0.3 : 0)) * dt;
+    if (this.riding) {
+      let burn = BURN.idle + frac * (this.boost ? BURN.boost : BURN.drive);
+      if (this.blades) burn += BURN.blades + (cutNow ? BURN.cut : 0);
+      this.fuel -= burn * dt;
+    } else if (this.blades) {
+      // parked with the blades spinning: the deck keeps draining
+      this.fuel -= BURN.blades * dt;
+    }
+    this.fuel = Math.max(0, this.fuel);
     this.refueling = false;
+    this.pourUpdate(dt);
+
     const { pump, d } = this.nearestPump();
     if (d < PUMP_R && this.fuel < this.fuelMax - 0.05) {
       if (this.money <= 0.01) {
@@ -782,8 +1020,24 @@ export class Game {
       }
     } else this.pumpHinted = false;
     const f = this.fuel / this.fuelMax;
-    if (f < 0.2 && !this.fuelWarned) { this.fuelWarned = true; this.sfx.deny(); this.hud.toast('⛽ Low on gas! Head to a pump (west end of each street)', 'bad'); }
+    if (f < 0.2 && !this.fuelWarned) {
+      this.fuelWarned = true;
+      this.sfx.deny();
+      if (this.canFuel > 0.5) this.hud.toast('⛽ Low on gas! Park up and press G to pour the spare can in, or head to a pump.', 'bad', 4200);
+      else this.hud.toast('⛽ Low on gas! Head to a pump (west end of each street)', 'bad');
+    }
     if (f > 0.5) this.fuelWarned = false;
+    // a dry tank with a can in the back isn't the end of the day any more
+    if (this.fuel <= 0 && this.canFuel > 0.5) {
+      this.fuel = 0;
+      if (!this.canHinted) {
+        this.canHinted = true;
+        this.sfx.sputter();
+        this.hud.toast('🛢️ Out of gas — but you have the spare can. Press G to pour it in!', 'bad', 5000);
+      }
+      if (!this.pouring) { this.mover.vx *= 1 - 6 * dt; this.mover.vz *= 1 - 6 * dt; }
+      return;
+    }
     if (this.fuel <= 0) {
       this.fuel = 0;
       this.phase = 'tow';
@@ -792,6 +1046,56 @@ export class Game {
       this.sfx.drone(0, 0);
       this.hud.toast(`⛽ Out of gas! Towing you to the nearest pump (−$${TOW_FEE})`, 'bad', 3000);
     }
+  }
+
+  /** G: pour the spare can into the tank (takes a moment, and only works parked). */
+  private startPour() {
+    if (this.phase !== 'play') return;
+    if (this.pouring > 0) return;
+    if (this.canFuel <= 0.5) { this.hud.toast('The spare can is empty. Fill it at a pump by parking next to one.', 'bad', 2600); return; }
+    if (this.fuel >= this.fuelMax - 1) { this.hud.toast('The tank is already full.', 'info', 1800); return; }
+    if (this.mover.speed > 1.2) { this.hud.toast('Stop the mower before pouring fuel.', 'info', 1800); return; }
+    if (!this.riding && Math.hypot(this.feet.x - this.mowerPark.x, this.feet.z - this.mowerPark.z) > 2.4) {
+      this.hud.toast('Walk back to the mower to pour the can into it.', 'info', 2200);
+      return;
+    }
+    this.pouring = CAN_POUR_TIME;
+    this.sfx.pour();
+    this.popups.spawn('pouring…', this.mover.x, 1.9, this.mover.z, '#ffd23a', 0.9, 1.2);
+  }
+
+  private pourUpdate(dt: number) {
+    if (this.pouring <= 0) return;
+    this.pouring -= dt;
+    const room = this.fuelMax - this.fuel;
+    const move = Math.min(room, this.canFuel, (this.fuelMax / CAN_POUR_TIME) * dt * 0.55);
+    this.fuel += move;
+    this.canFuel -= move;
+    this.glugT -= dt;
+    if (this.glugT <= 0) {
+      this.glugT = 0.12;
+      this.sfx.glug();
+      this.sparks.spawn(this.mover.x + (Math.random() - 0.5) * 0.5, 0.9, this.mover.z + (Math.random() - 0.5) * 0.5, 0, 1.2, 0, 1, 0.85, 0.35, 0.12, 0.4, 0);
+    }
+    if (Math.random() < 0.5) {
+      const p = this.model.pipeTip;
+      this.sparks.spawn(this.mover.x + p.x * 0.4, 1.05, this.mover.z + 0.2, (Math.random() - 0.5) * 0.4, -2.5, (Math.random() - 0.5) * 0.4, 1, 0.8, 0.25, 0.1, 0.35, 9);
+    }
+    if (this.pouring <= 0 || room - move <= 0.02 || this.canFuel <= 0.02) {
+      this.pouring = 0;
+      if (this.canFuel <= 0.5) this.canFuel = 0;
+      this.canHinted = false;
+      this.sfx.cash();
+      this.hud.toast(this.canFuel > 0.5 ? '🛢️ Topped up. Still some left in the can.' : '🛢️ Spare can empty — fill it up at a pump.', 'good', 2600);
+    }
+  }
+
+  /** At a pump with the can empty and the tank full, the can refills for free as part of the stop. */
+  private refillCanAtPump(dt: number) {
+    const { d } = this.nearestPump();
+    if (d >= PUMP_R) return;
+    if (this.canFuel >= this.fuelMax * CAN_FRACTION - 0.5) return;
+    this.canFuel = Math.min(this.fuelMax * CAN_FRACTION, this.canFuel + (this.fuelMax * CAN_FRACTION) / 6 * dt);
   }
 
   private updateTow(dt: number) {
@@ -804,17 +1108,26 @@ export class Game {
     this.money = Math.max(0, this.money - TOW_FEE);
     this.fuel = this.fuelMax * 0.3;
     const { pump } = this.nearestPump();
+    if (!this.riding) { this.riding = true; }
     m.place(pump.x + 0.2, pump.z, Math.PI / 2);
+    this.mowerPark = { x: m.x, z: m.z, yaw: m.yaw };
     this.cam.snap(m.x, m.z);
     this.squash.jump(3);
     this.phase = 'play';
   }
 
-  private placeAtPump() { this.mover.place(PUMP.x + 0.2, PUMP.z, Math.PI / 2); }
+  private placeAtPump() {
+    this.riding = true;
+    this.blades = true;
+    this.pouring = 0;
+    this.mover.place(PUMP.x + 0.2, PUMP.z, Math.PI / 2);
+    this.mowerPark = { x: this.mover.x, z: this.mover.z, yaw: this.mover.yaw };
+    this.feet.place(this.mover.x, this.mover.z, Math.PI / 2);
+  }
 
   // ---------------------------------------------------------------- knocking and bookings
   private checkKnock() {
-    const m = this.mover;
+    const m = this.active;
     let inZone = -1;
     for (const lot of this.world.lots) if (Math.abs(m.x - lot.door.x) < 2 && Math.abs(m.z - lot.door.z) < 2 && Math.hypot(m.x - lot.door.x, m.z - lot.door.z) < 1.15) inZone = lot.id;
     if (inZone < 0) { this.knockLock = -1; return; }
@@ -833,7 +1146,17 @@ export class Game {
       return;
     }
     if (st.status === 'rival') { this.hud.toast(`${who}: "Sorry, we signed with ${RIVAL}. Try again in ${st.rivalDays} day${st.rivalDays > 1 ? 's' : ''}."`, 'bad'); return; }
-    if (st.status === 'declined') { this.hud.toast(`No answer at #${lot.number}. They already said no today.`); return; }
+    // somebody who said no this morning gets one more go in the afternoon, for a price
+    if (st.status === 'declined') {
+      if (st.tries > 0 && this.hour < DAY_END - 1.25) {
+        this.sfx.knock();
+        this.phase = 'dialog';
+        this.openPitch(lot);
+        return;
+      }
+      this.hud.toast(`No answer at #${lot.number}. They already said no today.`);
+      return;
+    }
     this.sfx.knock();
     this.phase = 'dialog';
     if (this.hour > DAY_END - 1.25) {
@@ -842,28 +1165,125 @@ export class Game {
       ]);
       return;
     }
+    this.openPitch(lot);
+  }
+
+  /** The pitch card: full price, a discount, or a haggle. */
+  private openPitch(lot: Lot) {
+    const st = this.lots[lot.id];
+    if (st.status === 'prospect') { st.tries = 0; st.asked = 0; st.offer = null; }
+    const who = cap(lot.owner);
     const offer = st.offer ??= this.makeOffer(lot);
-    const cheap = Math.round(offer.price * 0.75);
-    const sample = st.cut / Math.max(1, lot.lawnCells.length) > 0.5;
-    const rookie = this.regulars ? 0 : 0.15;
-    const base = clamp(0.4 + rookie + (this.rep - 3) * 0.12 - st.grumpy * 0.3 + (sample ? 0.25 : 0), 0.05, 0.95);
-    const disc = clamp(base + 0.25, 0.05, 0.97);
     const due = this.dueTime(lot, offer.services);
-    const mood = st.grumpy > 0.6 ? 'They look grumpy.' : st.grumpy < 0.25 ? 'They seem friendly.' : 'They look busy.';
     const svc = ['🌱 mow', offer.services.sweep && '🍂 clear leaves', offer.services.edge && '📏 edge the paths', offer.services.hedge && '✂️ trim hedges'].filter(Boolean).join(' · ');
     const load = offer.days.map((d) => {
       const n = this.lots.filter((l) => l.status === 'client' && l.days.includes(d)).length;
       return `${WEEKDAYS[d]} <small>(${n} booked)</small>`;
     }).join(', ');
+    const mood = st.grumpy > 0.6 ? 'They look grumpy.' : st.grumpy < 0.25 ? 'They seem friendly.' : 'They look busy.';
+    const sample = st.cut / Math.max(1, lot.lawnCells.length) > 0.5;
+    const again = st.tries > 0;
     const body = `<i>*knock knock*</i> ${who} opens the door. ${mood}` +
+      (again ? '<br><i>"You again? Fine — what is it?"</i>' : '') +
       (sample ? '<br>"Oh! Did you already do half my lawn?"' : '') +
       `<div class="offer"><div><b>📅 ${offer.days.length}× a week:</b> ${load}</div><div><b>Each visit:</b> ${svc}</div>` +
-      `<div><b>Trial visit:</b> today, done by ${fmtHour(due)}</div></div>`;
-    this.hud.dialog(`#${lot.number} ${this.world.streets[lot.street].name} · ${who}`, body, [
-      { label: `Pitch $${offer.price}/visit`, sub: `${Math.round(base * 100)}% chance`, key: '1', primary: true, onPick: () => this.pitch(lot, offer, offer.price, base, due) },
-      { label: `Discount $${cheap}/visit`, sub: `${Math.round(disc * 100)}% chance`, key: '2', onPick: () => this.pitch(lot, offer, cheap, disc, due) },
-      { label: 'Leave', key: 'Esc', onPick: () => this.closeDialog() },
-    ]);
+      `<div><b>Trial visit:</b> today, done by ${fmtHour(due)}</div>` +
+      (again ? '<div class="haggle">They are already fed up. Haggle too often and they will show you the door.</div>' : '') + '</div>';
+    const opts: DialogOption[] = [];
+    const base = this.odds(st, true);
+    const cheap = Math.round(offer.price * 0.75);
+    const disc = this.odds(st, false);
+    opts.push({ label: `Pitch $${offer.price}/visit`, sub: `${Math.round(base * 100)}% chance`, key: '1', primary: true, onPick: () => this.pitch(lot, offer, offer.price, base, due) });
+    opts.push({ label: `Discount $${cheap}/visit`, sub: `${Math.round(disc * 100)}% chance`, key: '2', onPick: () => this.pitch(lot, offer, cheap, disc, due) });
+    // once they've turned you down, you can keep pushing on price or on what the job includes
+    if (st.tries > 0) {
+      const less: (Offer & { blurb: string }) | null = this.cheaperJob(offer);
+      if (less) {
+        opts.push({
+          label: `Haggle: $${less.price} for less`, sub: less.blurb, key: '3', onPick: () => this.haggle(lot, less, due),
+        });
+      }
+      opts.push({ label: 'Sweeten the deal (+$10)', sub: `raise the odds, ${'$'}10 off the first visit`, key: '4', onPick: () => this.sweeten(lot) });
+      opts.push({ label: 'Try again for full price', sub: `${Math.round(base * 100)}% chance`, key: '5', onPick: () => this.pitch(lot, offer, offer.price, base, due) });
+    }
+    opts.push({ label: again ? 'Give up' : 'Leave', key: 'Esc', onPick: () => this.retreat(lot) });
+    this.hud.dialog(`#${lot.number} ${this.world.streets[lot.street].name} · ${who}`, body, opts);
+  }
+
+  /** Odds of a yes. `full` uses the asking price; otherwise the discounted one. */
+  private odds(st: LotState, full: boolean) {
+    const sample = st.cut > 0;
+    const rookie = this.regulars ? 0 : 0.15;
+    const base = clamp(0.4 + rookie + (this.rep - 3) * 0.12 - st.grumpy * 0.3 + (sample ? 0.25 : 0), 0.05, 0.95);
+    return full ? base : clamp(base + 0.25, 0.05, 0.97);
+  }
+
+  /** A cheaper version of the same job: drop a service or a weekly visit. Null if there's nothing to drop. */
+  private cheaperJob(offer: Offer): (Offer & { blurb: string; key: string }) | null {
+    const drops: string[] = [];
+    if (offer.services.hedge) drops.push('hedge');
+    if (offer.services.edge) drops.push('edge');
+    if (offer.services.sweep) drops.push('sweep');
+    if (offer.days.length > 1) drops.push('visit');
+    if (!drops.length) return null;
+    const what = drops[0];
+    const services = { ...offer.services };
+    let days = offer.days;
+    let price = offer.price;
+    if (what === 'visit') { days = offer.days.slice(0, offer.days.length - 1); price = Math.round(price * 0.72); }
+    else {
+      (services as unknown as Record<string, boolean>)[what] = false;
+      price = Math.round(price - (what === 'hedge' ? 12 : what === 'edge' ? 9 : 10));
+    }
+    const blurb = what === 'visit' ? `${days.length}× a week instead of ${offer.days.length}` : `no ${what === 'sweep' ? 'leaf clearing' : what === 'edge' ? 'edging' : 'hedge trimming'}`;
+    return { price, days, services, blurb, key: what };
+  }
+
+  private haggle(lot: Lot, less: Offer & { blurb: string }, due: number) {
+    const st = this.lots[lot.id];
+    // dropping the price of the *whole* job reads as a real concession
+    const chance = clamp(0.55 + (this.rep - 3) * 0.08 - st.grumpy * 0.15, 0.25, 0.92);
+    if (Math.random() < chance) {
+      this.sign(lot, less, less.price, due);
+      this.hud.toast(`🤝 They took the smaller job: $${less.price}/visit, ${less.blurb}`, 'good', 4200);
+    } else this.turnedDown(lot, 'haggle');
+  }
+
+  private sweeten(lot: Lot) {
+    const st = this.lots[lot.id];
+    if (this.money < 10) { this.sfx.deny(); this.hud.toast("You haven't got $10 to spare.", 'bad', 1800); return; }
+    this.money -= 10;
+    st.grumpy = Math.max(0, st.grumpy - 0.35);
+    st.sweetened = true;
+    this.sfx.hmm();
+    this.closeDialog();
+    this.phase = 'play';
+    this.hud.toast('🍪 You offer to waive the first visit. They soften a little.', 'info', 2400);
+    setTimeout(() => { if (this.phase === 'play' && st.status !== 'client') { st.status = 'prospect'; this.phase = 'dialog'; this.openPitch(lot); } }, 900);
+  }
+
+  private retreat(lot: Lot) {
+    const st = this.lots[lot.id];
+    if (st.tries > 0) st.status = 'declined';
+    this.closeDialog();
+  }
+
+  /** They said no. Remember it so the next knock can haggle, and close the door after too many tries. */
+  private turnedDown(lot: Lot, why: 'pitch' | 'haggle') {
+    const st = this.lots[lot.id];
+    st.tries++;
+    st.grumpy = Math.min(1, st.grumpy + (why === 'haggle' ? 0.18 : 0.08));
+    st.status = 'declined';
+    this.sfx.rejected();
+    this.closeDialog();
+    const line = st.tries >= 3
+      ? '"That\'s enough now. Goodbye." *door closes firmly*'
+      : why === 'haggle'
+        ? '"That is still too rich for my blood. Come back with a better offer."'
+        : NO_THANKS[Math.floor(Math.random() * NO_THANKS.length)];
+    this.hud.toast(`🚪 ${cap(lot.owner)}: ${line}`, 'bad', 3600);
+    if (st.tries < 3) setTimeout(() => this.hud.toast('💬 Knock again to haggle — offer less, or drop a service.', 'info', 3400), 1400);
+    else { st.grumpy = 1; this.rep = clamp(this.rep - 0.1, 0, 5); }
   }
 
   /** What this owner wants: how often, which weekdays, which services, and the going rate. */
@@ -886,25 +1306,27 @@ export class Game {
   }
 
   private pitch(lot: Lot, offer: Offer, price: number, chance: number, due: number) {
+    if (Math.random() < chance) this.sign(lot, offer, price, due);
+    else this.turnedDown(lot, 'pitch');
+  }
+
+  /** Sign them up: the trial visit today, then the regular bookings. */
+  private sign(lot: Lot, offer: Offer, price: number, due: number) {
     const st = this.lots[lot.id];
     this.closeDialog();
-    if (Math.random() < chance) {
-      st.status = 'job';
-      st.pay = price;
-      st.deadline = due;
-      st.days = offer.days;
-      st.services = offer.services;
-      st.strikes = 0;
-      st.good = 0;
-      this.sfx.hired();
-      this.squash.jump(3.5);
-      this.sparks.burst(this.mover.x, 1, this.mover.z, 20, 4, 0.4, 1, 0.5, 0.25, 0.7, 6);
-      this.hud.toast(`🤝 Hired! Trial visit by ${fmtHour(due)}, then every ${dayList(offer.days)} for $${price}`, 'good', 4200);
-    } else {
-      st.status = 'declined';
-      this.sfx.rejected();
-      this.hud.toast(`🚪 ${cap(lot.owner)}: ${NO_THANKS[Math.floor(Math.random() * NO_THANKS.length)]}`, 'bad', 3200);
-    }
+    st.status = 'job';
+    st.pay = price;
+    st.deadline = due;
+    st.days = offer.days;
+    st.services = offer.services;
+    st.strikes = 0;
+    st.good = 0;
+    st.tries = 0;
+    this.sfx.hired();
+    this.squash.jump(3.5);
+    const m = this.mover;
+    this.sparks.burst(m.x, 1, m.z, 20, 4, 0.4, 1, 0.5, 0.25, 0.7, 6);
+    this.hud.toast(`🤝 Hired! Trial visit by ${fmtHour(due)}, then every ${dayList(offer.days)} for $${price}`, 'good', 4200);
   }
 
   private closeDialog() {
@@ -1008,20 +1430,34 @@ export class Game {
   }
 
   private buildGnomes() {
-    const lam = (c: string) => new THREE.MeshLambertMaterial({ color: c });
+    const lam = (c: string) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.7, metalness: 0.02 });
+    const ceramic = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.28, metalness: 0.05 });
     for (const lot of this.world.lots) for (const s of lot.gnomeSpots) {
       const g = new THREE.Group();
-      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.2, 0.4, 10), lam('#2f6fb5'));
-      body.position.y = 0.2;
-      const head = new THREE.Mesh(new THREE.SphereGeometry(0.12, 10, 8), lam('#f0c19a'));
+      // body: blue tunic, boots, a white beard and a pointed red hat, on a little base
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.22, 0.06, 12), lam('#b9b2a4'));
+      base.position.y = 0.03;
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.19, 0.36, 12), lam('#2f6fb5'));
+      body.position.y = 0.24;
+      for (const x of [-0.08, 0.08]) {
+        const boot = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.08, 0.14), lam('#3b2b20'));
+        boot.position.set(x, 0.09, 0.04);
+        g.add(boot);
+      }
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.12, 14, 10), lam('#f0c19a'));
       head.position.y = 0.5;
-      const beard = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.22, 8), lam('#f4f4f4'));
-      beard.position.set(0, 0.4, 0.08);
+      const nose = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 6), lam('#e8a882'));
+      nose.position.set(0, 0.49, 0.115);
+      const beard = new THREE.Mesh(new THREE.ConeGeometry(0.115, 0.26, 10), ceramic);
+      beard.position.set(0, 0.4, 0.06);
       beard.rotation.x = Math.PI;
-      const hat = new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.35, 10), lam('#d23a2c'));
-      hat.position.y = 0.75;
-      g.add(body, head, beard, hat);
-      g.traverse((o) => { o.castShadow = true; });
+      const hat = new THREE.Mesh(new THREE.ConeGeometry(0.135, 0.38, 12), new THREE.MeshStandardMaterial({ color: '#d23a2c', roughness: 0.35, metalness: 0.05 }));
+      hat.position.y = 0.76;
+      hat.rotation.z = 0.08;
+      const hatTip = new THREE.Mesh(new THREE.SphereGeometry(0.03, 6, 5), ceramic);
+      hatTip.position.set(0.03, 0.95, 0);
+      g.add(base, body, head, nose, beard, hat, hatTip);
+      g.traverse((o) => { if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.receiveShadow = true; } });
       this.world.scene.add(g);
       this.gnomes.push({ obj: g, hx: s.x, hz: s.z, x: s.x, z: s.z, vx: 0, vz: 0, spin: 0, tip: 0, knocked: false, lot: lot.id });
     }
@@ -1037,7 +1473,7 @@ export class Game {
   }
 
   private updateGnomes(dt: number) {
-    const m = this.mover;
+    const m = this.active;
     for (const g of this.gnomes) {
       if (!g.knocked && this.phase === 'play' && Math.abs(g.x - m.x) < 2 && Math.abs(g.z - m.z) < 2) {
         const dx = g.x - m.x, dz = g.z - m.z, d = Math.hypot(dx, dz);
@@ -1082,7 +1518,13 @@ export class Game {
       if (this.windT <= 0) {
         this.windT = 0.35;
         const open = this.world.lots.filter((l) => this.open(l));
-        this.leaves.drop(open[Math.floor(Math.random() * open.length)]);
+        const lot = open[Math.floor(Math.random() * open.length)];
+        this.leaves.drop(lot);
+        // now and then a whole drift lifts off and swirls
+        if (Math.random() < 0.5) {
+          const c = lot.pavedCells[Math.floor(Math.random() * lot.pavedCells.length)];
+          this.leaves.gust(cellX(c), cellZ(c), 5.5, 6.5, 3.2, lot.id);
+        }
       }
     }
   }
@@ -1139,7 +1581,7 @@ export class Game {
       s.scale.set(sc, sc, 1);
       mat.opacity = key === 'declined' || key === 'booked' ? 0.6 : 1;
       s.position.set(lot.door.x, 4.6 + Math.sin(t * 2.2 + i) * 0.18, lot.door.z);
-      const near = Math.hypot(this.mover.x - lot.door.x, this.mover.z - lot.door.z);
+      const near = Math.hypot(this.active.x - lot.door.x, this.active.z - lot.door.z);
       if (this.phase !== 'title') mat.opacity *= clamp((near - 2) / 4, 0.15, 1);
     });
     for (const s of this.world.streets) {
@@ -1153,7 +1595,7 @@ export class Game {
 
   /** Houses and tree crowns between the camera and the mower go see-through. */
   private updateFades(dt: number) {
-    const m = this.mover, k = Math.min(1, dt * 8);
+    const m = this.active, k = Math.min(1, dt * 8);
     const playing = this.phase !== 'title';
     for (const lot of this.world.lots) {
       const b = lot.houseBox;
@@ -1174,7 +1616,7 @@ export class Game {
   }
 
   private updateLighting() {
-    const w = this.world, m = this.mover;
+    const w = this.world, m = this.active;
     w.sun.position.set(m.x + 18, 32, m.z + 14);
     w.sun.target.position.set(m.x, 0, m.z);
     const h = this.phase === 'title' ? 10 : this.hour;
@@ -1184,7 +1626,11 @@ export class Game {
     w.sun.intensity = (2.2 - eve * 0.7) * (1 - cloud * 0.6);
     w.hemi.intensity = (1.1 - eve * 0.35) * (1 - cloud * 0.15);
     const sky = this.tmp.set(0.62, 0.83, 0.94).lerp(new THREE.Vector3(0.95, 0.68, 0.5), eve * 0.75 * (1 - cloud * 0.6)).lerp(new THREE.Vector3(0.55, 0.6, 0.66), cloud * 0.8);
-    (w.scene.background as THREE.Color).setRGB(sky.x, sky.y, sky.z, THREE.SRGBColorSpace);
+    // the panoramic sky dome sits under the scene background, and its tint follows the hour
+    if (w.sky) {
+      w.sky.position.set(this.engine.camera.position.x, 0, this.engine.camera.position.z);
+      (w.sky.material as THREE.MeshBasicMaterial).color.setRGB(0.55 + eve * 0.5 + cloud * 0.35, 0.55 + eve * 0.35 + cloud * 0.35, 0.58 + cloud * 0.35);
+    }
     (w.scene.fog as THREE.Fog).color.setRGB(sky.x, sky.y, sky.z, THREE.SRGBColorSpace);
   }
 
@@ -1202,13 +1648,14 @@ export class Game {
         here: this.curLot === i,
         trial: st.status === 'job',
         crew: st.crew >= 0 ? this.crew[st.crew]?.name ?? null : null,
-        d: Math.hypot(lot.centre.x - this.mover.x, lot.centre.z - this.mover.z) + (st.crew >= 0 ? 1000 : 0) - (st.status === 'job' ? 500 : 0),
+        d: Math.hypot(lot.centre.x - this.active.x, lot.centre.z - this.active.z) + (st.crew >= 0 ? 1000 : 0) - (st.status === 'job' ? 500 : 0),
       });
     });
     jobs.sort((a, b) => a.d - b.d);
     this.hud.update({
       regulars: this.regulars, money: this.money, dayLabel: `${WEEKDAYS[this.weekday]} · Wk ${this.weekNo}`, hour: this.hour, rep: this.rep,
-      weather: WEATHER[this.today].icon, fuel: this.fuel, fuelMax: this.fuelMax, refueling: this.refueling, jobs,
+      weather: WEATHER[this.today].icon, fuel: this.fuel, fuelMax: this.fuelMax, refueling: this.refueling,
+      can: this.canFuel, blades: this.blades, riding: this.riding, jobs,
     });
   }
 
@@ -1244,8 +1691,12 @@ export class Game {
     const dot = (mv: Mover, color: string, r: number) => { g.fillStyle = color; g.beginPath(); g.arc(X(mv.x), Z(mv.z), r, 0, Math.PI * 2); g.fill(); };
     for (const c of this.crew) dot(c.npc.mover, '#5dff9a', 2.6);
     if (this.rival.active) dot(this.rival.npc.mover, '#5aa0ff', 2.6);
-    const m = this.mover;
-    dot(m, '#fff', 3.2);
+    const m = this.active;
+    if (!this.riding) {
+      g.fillStyle = '#ffd23a';
+      g.beginPath(); g.arc(X(this.mowerPark.x), Z(this.mowerPark.z), 2.4, 0, Math.PI * 2); g.fill();
+    }
+    dot(m, '#fff', this.riding ? 3.2 : 2.6);
     g.strokeStyle = '#fff'; g.lineWidth = 1.5;
     g.beginPath(); g.moveTo(X(m.x), Z(m.z)); g.lineTo(X(m.x) + Math.sin(m.yaw) * 7, Z(m.z) + Math.cos(m.yaw) * 7); g.stroke();
   }

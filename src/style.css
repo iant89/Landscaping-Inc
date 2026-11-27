@@ -29,6 +29,18 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd3f0; col
 .fuel-fill.filling { background: linear-gradient(90deg, #4cd964, #a8f07a); }
 .fuel-text { font-size: 12px; font-weight: 800; min-width: 46px; text-align: right; }
 @keyframes blink { 50% { opacity: 0.35; } }
+.can-text { display: flex; align-items: center; gap: 5px; margin-top: 5px; font-size: 12px; font-weight: 800; }
+.can-text .jerry { font-size: 14px; }
+.can-text .jerry.empty { filter: grayscale(1); opacity: 0.5; }
+.can-text .k { position: static; opacity: 0.45; }
+.mode { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.chip-mode { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 800; background: #eef1e4; border-radius: 999px; padding: 2px 8px; }
+.chip-mode.on { background: #d4f1df; color: var(--green-dark); }
+.chip-mode.off { background: #fadad5; color: #a1281a; }
+.chip-mode.walk { background: #dfe9f5; color: #24476e; }
+.chip-mode .k { position: static; opacity: 0.5; }
+.haggle { margin-top: 6px; font-size: 13px; color: #a1281a; font-weight: 700; }
+.how b.key, .how b.key { background: #3d5a86; color: #fff; border-radius: 5px; padding: 0 5px; }
 
 .jobs { position: absolute; left: 12px; bottom: 12px; width: min(330px, calc(100vw - 24px)); padding: 10px 12px; font-size: 13px; }
 .jobs-title { font-weight: 900; text-transform: uppercase; font-size: 11px; letter-spacing: 0.08em; opacity: 0.6; margin-bottom: 4px; }

@@ -15,6 +15,10 @@ export interface JobLine {
 export interface HudData {
   money: number; dayLabel: string; hour: number; rep: number; weather: string;
   fuel: number; fuelMax: number; refueling: boolean;
+  /** Fuel left in the spare can, same units. */
+  can: number;
+  /** Blades engaged, and whether you're riding the mower or on foot. */
+  blades: boolean; riding: boolean;
   jobs: JobLine[]; regulars: number;
 }
 export type CellState = 'done' | 'missed' | 'due' | 'later';
@@ -62,6 +66,8 @@ export class Hud {
   private stats: HTMLDivElement;
   private fuelBar: HTMLDivElement;
   private fuelText: HTMLDivElement;
+  private canEl: HTMLDivElement;
+  private modeEl: HTMLDivElement;
   private jobs: HTMLDivElement;
   private toasts: HTMLDivElement;
   private overlay: HTMLDivElement;
@@ -77,8 +83,10 @@ export class Hud {
     this.fuelText = h('div', 'fuel-text');
     const track = h('div', 'fuel-track');
     track.appendChild(this.fuelBar);
+    this.canEl = h('div', 'can-text');
     fuel.append(h('span', 'fuel-icon', '⛽'), track, this.fuelText);
-    tl.append(this.stats, fuel);
+    this.modeEl = h('div', 'mode');
+    tl.append(this.stats, fuel, this.canEl, this.modeEl);
     this.jobs = h('div', 'panel jobs');
     const tr = h('div', 'tr');
     this.minimap = h('canvas', 'panel minimap');
@@ -113,9 +121,14 @@ export class Hud {
       `<div class="clock">${d.dayLabel} · ${fmtHour(d.hour)} <span class="wx">${d.weather}</span></div>` +
       `<div class="rep" title="Reputation">${stars(d.rep)} <span>${d.rep.toFixed(1)}</span></div>`;
     const f = d.fuel / d.fuelMax;
+    const cf = d.fuelMax ? d.can / d.fuelMax : 0;
     this.fuelBar.style.width = `${(f * 100).toFixed(1)}%`;
     this.fuelBar.className = `fuel-fill${f < 0.2 ? ' low' : ''}${d.refueling ? ' filling' : ''}`;
     this.fuelText.textContent = d.refueling ? 'Filling…' : `${Math.ceil(f * 100)}%`;
+    this.canEl.innerHTML = `<span class="jerry${cf > 0 ? '' : ' empty'}">🛢️</span>${cf > 0 ? `${Math.ceil(cf * 100)}%` : 'empty'}<span class="k">G</span>`;
+    this.modeEl.innerHTML = (d.riding
+      ? `<span class="chip-mode">🚜 riding</span><span class="chip-mode ${d.blades ? 'on' : 'off'}">${d.blades ? '🌀 blades on' : '⏸ blades off'} <span class="k">B</span></span><span class="chip-mode">🚶 <span class="k">E</span></span>`
+      : '<span class="chip-mode walk">🚶 on foot</span><span class="chip-mode"><span class="k">E</span> climb on</span>');
     if (!d.jobs.length) {
       this.jobs.innerHTML = d.regulars
         ? '<div class="hint">✅ Nothing left on today\'s schedule. Knock on doors marked <b>!</b> to grow the business.</div>'
@@ -190,8 +203,10 @@ export class Hud {
         <li>Some also want leaves cleared 🍂, edges trimmed 📏 or hedges cut ✂️</li>
         <li>Rain makes grass shoot up; wind brings leaves. Watch out for Green Giant Lawns.</li>
         <li>Hire crew to mow your regulars, and win more streets as your reputation grows</li>
+        <li><b class="key">E</b> hop off and walk (a parked mower barely drinks fuel) · <b class="key">B</b> blades off · <b class="key">G</b> pour the spare can</li>
+        <li>Rung down? Knock again and <b>haggle</b> — cheaper rate, or drop a service they don't need</li>
       </ul>
-      <div class="controls">WASD / arrows to drive · Shift for full throttle · C for schedule · Esc to pause · M to mute</div>`);
+      <div class="controls">WASD / arrows to drive · Shift for full throttle · E mount/dismount · B blades · G spare can · C schedule · Esc pause · M mute</div>`);
     const opts: DialogOption[] = [];
     if (hasSave) opts.push({ label: 'Continue', key: '⏎', primary: true, onPick: onContinue });
     opts.push({ label: hasSave ? 'New business' : 'Start mowing', key: hasSave ? 'N' : '⏎', primary: !hasSave, onPick: onNew });
