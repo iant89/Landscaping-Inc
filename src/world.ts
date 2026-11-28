@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { AABB, makeRng } from '../engine/src';
+import { AABB, batchStatic, makeRng, meshMaterials } from '../engine/src';
 import { garageTexture, grassTexture, pavingTexture, shingleTexture, sidingTexture, texMat, woodTexture } from './textures';
 import { grassTintForCell } from './grass-color';
 import {
@@ -14,7 +14,8 @@ type Rect = [number, number, number, number]; // lx0, lx1, d0, d1 in lot-local c
 export interface Hedge {
   lot: number;
   box: AABB;
-  tufts: THREE.Object3D;
+  /** Show or hide this stretch's tufts (they're drawn as part of one mesh per lot). */
+  tufts: { visible: boolean };
   shaggy: boolean;
   /** Nights until it turns shaggy again. */
   regrow: number;
@@ -195,7 +196,8 @@ export function buildWorld(seed = 1): World {
     if (lot.side > 0) g.position.set(lot.x0, 0, lot.zc);
     else { g.position.set(lot.x0 + LOT_W, 0, lot.zc); g.rotation.y = Math.PI; }
     scene.add(g);
-    buildHouse(g, lot, pick(WALLS), pick(ROOFS), rng);
+    const house = buildHouse(g, lot, pick(WALLS), pick(ROOFS), rng);
+    const tuftSet = new TuftSet(tuftMat);
     addGardenPlanting(g, lot, rng);
     boxes.push(lot.houseBox);
 
@@ -231,16 +233,17 @@ export function buildWorld(seed = 1): World {
         const seg = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.3, len), hedgeMat);
         seg.position.set(hx, 0.65, d0 + len / 2);
         seg.castShadow = seg.receiveShadow = true;
-        const tufts = new THREE.Group();
+        const parts: THREE.BufferGeometry[] = [];
         for (let t = 0; t < 5; t++) {
-          const b = new THREE.Mesh(tuftGeo, tuftMat);
+          const b = new THREE.Object3D();
           b.position.set(hx + (rng() - 0.5) * 0.5, 1.2 + rng() * 0.3, d0 + rng() * len);
           b.rotation.set(rng() * 3, rng() * 3, 0);
           b.scale.setScalar(0.8 + rng() * 0.6);
-          b.castShadow = true;
-          tufts.add(b);
+          b.updateMatrix();
+          parts.push(tuftGeo.clone().applyMatrix4(b.matrix));
         }
-        g.add(seg, tufts);
+        const tufts = tuftSet.addSection(parts);
+        g.add(seg);
         const box = rectWorld(lot, [hx - 0.25, hx + 0.25, d0, d0 + len]);
         boxes.push(box);
         const h: Hedge = { lot: lot.id, box, tufts, shaggy: true, regrow: 0 };
@@ -272,6 +275,10 @@ export function buildWorld(seed = 1): World {
         break;
       }
     }
+    // The yard's static props (fence, hedge segments, mailbox, shrubs) collapse into a few meshes.
+    // The house fades on its own and each hedge's tufts get hidden when trimmed, so those stay apart.
+    g.add(tuftSet.build());
+    batchStatic(g, (o) => o === house || o === tuftSet.mesh);
   }
 
   // ---------------------------------------------------------------- grid classification
@@ -342,6 +349,7 @@ export function buildWorld(seed = 1): World {
       // a little gas station at the west end of the street
       const st = buildGasStation();
       st.position.set(pump.x - 3.2, 0, pump.z);
+      batchStatic(st);
       scene.add(st);
       boxes.push({ minX: pump.x - 5, maxX: pump.x - 1.6, minZ: pump.z - 1.2, maxZ: pump.z + 1.2 });
     }
@@ -351,11 +359,14 @@ export function buildWorld(seed = 1): World {
     ring.position.set(pump.x + 0.2, 0.03, pump.z);
     scene.add(ring);
 
+    // parked cars and streetlamps never move, so each street's set is batched into a few meshes
+    const props = new THREE.Group();
+    scene.add(props);
     for (let k = 0; k < 3; k++) {
       const x = 14 + k * 24 + rng() * 10, z = zc + (k % 2 ? -1 : 1) * 2.7;
       const car = buildCar(pick(carColors));
       car.position.set(x, 0, z);
-      scene.add(car);
+      props.add(car);
       boxes.push({ minX: x - 2.1, maxX: x + 2.1, minZ: z - 0.95, maxZ: z + 0.95 });
     }
     for (let k = 0; k < 7; k++) {
@@ -370,21 +381,26 @@ export function buildWorld(seed = 1): World {
       for (const side of [-1, 1] as const) {
         const lamp = buildStreetLight(side);
         lamp.position.set(x, 0, zc + side * 5.15);
-        scene.add(lamp);
+        props.add(lamp);
       }
     }
+    batchStatic(props);
 
     let barrier: Street['barrier'] = null;
     if (si > 0) {
       const bz = zc - BAND;
       const objs: THREE.Object3D[] = [];
+      // the sawhorses are only ever cleared all at once, so they share one batched group
+      const horses = new THREE.Group();
       for (let x = MIN_X + 1; x < MAX_X; x += 2.2) {
         if (x > 1 && x < STREET_END) continue; // the back fences already close this stretch
         const s = buildSawhorse();
         s.position.set(x, 0, bz);
-        scene.add(s);
-        objs.push(s);
+        horses.add(s);
       }
+      batchStatic(horses);
+      scene.add(horses);
+      objs.push(horses);
       const sign = new THREE.Mesh(new THREE.BoxGeometry(6, 1.6, 0.1), new THREE.MeshBasicMaterial({ map: textTexture(`${STREETS[si].name.toUpperCase()} · COMING SOON`, '#1f2a1c', '#ffd23a', 1024, 256, 64) }));
       sign.position.set((CROSS_X0 + CROSS_X1) / 2, 2.1, bz + 0.3);
       scene.add(sign);
@@ -633,7 +649,8 @@ function shadowed<T extends THREE.Object3D>(o: T) {
 
 /** A subdued edge trace, revealed only while its model is faded to help preserve its silhouette. */
 function addWireOutline(root: THREE.Object3D, color = '#25311f') {
-  const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0, depthWrite: false, toneMapped: false });
+  // starts invisible (material.visible = false skips the draw entirely); fading code turns it on
+  const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0, depthWrite: false, toneMapped: false, visible: false });
   const meshes: THREE.Mesh[] = [];
   root.traverse((o) => { if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh); });
   for (const mesh of meshes) {
@@ -757,6 +774,12 @@ function buildHouse(parent: THREE.Group, lot: Lot, wall: string, roof: string, r
   shadowed(g);
   lot.houseWire = addWireOutline(g);
   parent.add(g);
+  // ~40 parts become a handful of meshes; the fade then drives the merged materials
+  batchStatic(g);
+  lot.houseMats = meshMaterials(g);
+  // opaque until the player walks behind it (the fade code switches blending on as needed)
+  for (const m of lot.houseMats) m.transparent = false;
+  return g;
 }
 
 /** Small layered shrubs and seasonal flowers bring color to the otherwise flat mulch beds. */
@@ -871,7 +894,10 @@ function addTree(scene: THREE.Scene, x: number, z: number, rng: () => number): T
   root.add(shadowed(trunk), ...branches.map((b) => shadowed(b)), shadowed(crown));
   const wire = addWireOutline(root);
   scene.add(root);
-  return { x, z, mats: [trunkMat, mat, matDark], wire, fade: 1, h };
+  batchStatic(root);
+  const mats = meshMaterials<THREE.MeshStandardMaterial>(root);
+  for (const m of mats) m.transparent = false;
+  return { x, z, mats, wire, fade: 1, h };
 }
 
 function buildGasStation() {
@@ -974,6 +1000,54 @@ export function textTexture(text: string, fg: string, bg: string | null, w = 128
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
+}
+
+/**
+ * All of a lot's hedge tufts in one mesh. Each hedge stretch owns a range of vertices; hiding a
+ * stretch rewrites the index buffer to leave its range out, so trimming costs no extra draw calls.
+ */
+class TuftSet {
+  mesh!: THREE.Mesh;
+  private parts: THREE.BufferGeometry[] = [];
+  private sections: { start: number; count: number; visible: boolean }[] = [];
+  private vertices = 0;
+
+  constructor(private material: THREE.Material) {}
+
+  addSection(geos: THREE.BufferGeometry[]): { visible: boolean } {
+    const start = this.vertices;
+    for (const g of geos) {
+      const ng = g.index ? g.toNonIndexed() : g;
+      this.parts.push(ng);
+      this.vertices += ng.attributes.position.count;
+    }
+    const sec = { start, count: this.vertices - start, visible: true };
+    this.sections.push(sec);
+    const set = this;
+    return {
+      get visible() { return sec.visible; },
+      set visible(v: boolean) { if (sec.visible !== v) { sec.visible = v; set.reindex(); } },
+    };
+  }
+
+  build() {
+    const geo = mergeGeometries(this.parts)!;
+    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(this.vertices), 1));
+    this.mesh = new THREE.Mesh(geo, this.material);
+    this.mesh.castShadow = true;
+    this.reindex();
+    return this.mesh;
+  }
+
+  private reindex() {
+    if (!this.mesh) return;
+    const index = this.mesh.geometry.index!, arr = index.array as Uint32Array;
+    let n = 0;
+    for (const s of this.sections) if (s.visible) for (let i = 0; i < s.count; i++) arr[n++] = s.start + i;
+    this.mesh.geometry.setDrawRange(0, n);
+    this.mesh.visible = n > 0;
+    index.needsUpdate = true;
+  }
 }
 
 /** Open a street: clear its barrier away. */

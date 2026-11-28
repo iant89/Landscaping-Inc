@@ -2800,11 +2800,9 @@ export class Game {
       const target = hide ? 0.14 : 1;
       if (Math.abs(lot.fade - target) < 0.002) continue;
       lot.fade += (target - lot.fade) * k;
-      for (const mat of lot.houseMats) {
-        mat.opacity = lot.fade;
-        mat.depthWrite = lot.fade > 0.97;
-      }
-      if (lot.houseWire) lot.houseWire.opacity = (1 - lot.fade) * 0.95;
+      if (Math.abs(lot.fade - target) < 0.002) lot.fade = target;
+      for (const mat of lot.houseMats) setFade(mat, lot.fade);
+      if (lot.houseWire) setWire(lot.houseWire, (1 - lot.fade) * 0.95);
     }
     // Fade only trees that actually intersect the camera-to-player sightline. This avoids the old
     // proximity-only effect, which could make nearby trees disappear even when they were offscreen.
@@ -2819,11 +2817,9 @@ export class Game {
       const target = playing && intersects ? 0.14 : 1;
       if (Math.abs(tr.fade - target) < 0.002) continue;
       tr.fade += (target - tr.fade) * k;
-      for (const mat of tr.mats) {
-        mat.opacity = tr.fade;
-        mat.depthWrite = tr.fade > 0.97;
-      }
-      tr.wire.opacity = (1 - tr.fade) * 0.95;
+      if (Math.abs(tr.fade - target) < 0.002) tr.fade = target;
+      for (const mat of tr.mats) setFade(mat, tr.fade);
+      setWire(tr.wire, (1 - tr.fade) * 0.95);
     }
   }
 
@@ -2930,4 +2926,21 @@ function separate(a: Mover, b: Mover) {
   const j = -rv * 0.6;
   a.vx -= nx * j; a.vz -= nz * j; b.vx += nx * j; b.vz += nz * j;
   return -rv;
+}
+
+/**
+ * Fade a house or tree material. Fully opaque, it renders in the opaque pass (front-to-back, with
+ * early depth rejection); only while it's see-through does it switch to blended rendering.
+ */
+function setFade(mat: THREE.Material, fade: number) {
+  mat.opacity = fade;
+  mat.depthWrite = fade > 0.97;
+  const transparent = fade < 1;
+  if (mat.transparent !== transparent) { mat.transparent = transparent; mat.needsUpdate = true; }
+}
+
+/** Outline strength for a faded model; at zero the lines aren't drawn at all. */
+function setWire(mat: THREE.LineBasicMaterial, opacity: number) {
+  mat.opacity = opacity;
+  mat.visible = opacity > 0.001;
 }

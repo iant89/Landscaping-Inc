@@ -13,3 +13,4 @@ export { Synth } from './audio';
 export { Popups } from './popups';
 export { damp, dampK, lerpAngle, clamp, easeInOut, makeRng } from './math';
 export { DistanceCuller } from './cull';
+export { batchStatic, meshMaterials } from './batch';
