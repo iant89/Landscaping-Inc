@@ -38,8 +38,10 @@ interface LotState {
   /** Visits done in a row since the last strike; two of them wipe a strike. */
   good: number;
   rivalDays: number;
-  /** Grass height, 0 (just mown) .. 1 (jungle). Grows every night, faster after rain. */
+  /** Grass height; overgrown yards can exceed the mower's safe deck height. */
   level: number;
+  /** This yard grows unusually thick grass: a premium, weed-eater-only job when fully grown. */
+  overgrown: boolean;
   flowers: number;
   gnome: boolean;
   cut: number;
@@ -72,7 +74,7 @@ interface SaveFile {
   toolFuel: number;
   /** True once the opening tutorial has been finished (or skipped). */
   tutDone: boolean;
-  lots: Pick<LotState, 'status' | 'grumpy' | 'pay' | 'days' | 'services' | 'strikes' | 'good' | 'rivalDays' | 'level'>[];
+  lots: Pick<LotState, 'status' | 'grumpy' | 'pay' | 'days' | 'services' | 'strikes' | 'good' | 'rivalDays' | 'level' | 'overgrown'>[];
 }
 const SAVE_KEY = 'li_save_v4';
 const RIVAL = 'Green Giant Lawns';
@@ -134,6 +136,7 @@ export class Game {
   mover = new Mover({ radius: 0.8, maxSpeed: 5.4, accel: 10, decel: 7, turnRate: 10 });
   squash = new Squash({ stiffness: 150, damping: 10 });
   cam: FollowCamera;
+  private cameraView: 'far' | 'close' | 'first' = 'far';
   controls: Input;
   sfx = new Sfx();
   popups: Popups;
@@ -249,6 +252,8 @@ export class Game {
   private fuelWarned = false;
   private pumpHinted = false;
   private boost = false;
+  private touchDriveKeys = new Set<'left' | 'right' | 'forward' | 'reverse'>();
+  private touchToolHeld = false;
   private tmp = new THREE.Vector3();
 
   get weekday() { return (this.day - 1) % 7; }
@@ -309,13 +314,26 @@ export class Game {
     new TouchStick(container, this.controls);
     this.setupOrbit();
     this.popups = new Popups(container);
-    this.hud = new Hud(container, this.engine.isTouch, (b) => this.controls.setBoost(b), () => this.pause(), () => this.toggleSchedule());
+    this.hud = new Hud(
+      container, this.engine.isTouch, (b) => this.controls.setBoost(b), () => this.pause(), () => this.toggleSchedule(),
+      (key, down) => {
+        if (down) { this.sfx.unlock(); this.touchDriveKeys.add(key); }
+        else this.touchDriveKeys.delete(key);
+      },
+      (key, down) => {
+        if (down) this.sfx.unlock();
+        if (key === 'tool') { this.touchToolHeld = down; return; }
+        if (!down) return;
+        if (key === 'mount') this.mounted !== null ? this.dismount() : this.mount();
+        else this.openTrailer();
+      },
+    );
     container.addEventListener('pointerdown', () => this.sfx.unlock());
     this.rival = { npc: new Npc(this.world.scene, RIVAL_COLORS, RIVAL_HOME.x, RIVAL_HOME.z), target: -1, active: false };
     this.rival.npc.mover.o.maxSpeed = 3.8;
     this.buildMarkers();
     this.buildGnomes();
-    this.lots = this.world.lots.map(() => this.freshLot());
+    this.lots = this.freshLots();
     this.forecast = [rollWeather(null), rollWeather(null), rollWeather(null), rollWeather(null)];
     this.leaves.scatter(this.world, () => 20);
     this.placeAtPump();
@@ -324,11 +342,24 @@ export class Game {
   }
 
   private freshLot(): LotState {
+    const overgrown = Math.random() < 0.14;
     return {
       status: 'prospect', deadline: DAY_END, pay: 0, days: [], services: noServices(), doneToday: false,
-      grumpy: Math.random() * 0.6, strikes: 0, good: 0, rivalDays: 0, level: 0.7 + Math.random() * 0.3,
+      grumpy: Math.random() * 0.6, strikes: 0, good: 0, rivalDays: 0,
+      level: overgrown ? 1.25 + Math.random() * 0.35 : 0.7 + Math.random() * 0.3, overgrown,
       flowers: 0, gnome: false, cut: 0, edgeCut: 0, offer: null, tries: 0, asked: 0, sweetened: false, crew: -1,
     };
+  }
+
+  private freshLots() {
+    const lots = this.world.lots.map(() => this.freshLot());
+    // Keep a special overgrown job available on the starter street in every new business.
+    if (!lots.slice(0, 8).some((lot) => lot.overgrown)) {
+      const i = Math.floor(Math.random() * 8);
+      lots[i].overgrown = true;
+      lots[i].level = 1.25 + Math.random() * 0.35;
+    }
+    return lots;
   }
 
   private isDue(st: LotState) { return st.status === 'job' || (st.status === 'client' && st.days.includes(this.weekday)); }
@@ -350,7 +381,7 @@ export class Game {
     this.tool = null;
     this.toolFuel = this.toolFuelMax;
     this.blades = true;
-    this.lots = this.world.lots.map(() => this.freshLot());
+    this.lots = this.freshLots();
     this.week = {};
     this.forecast = ['sunny', rollWeather('sunny'), rollWeather(null), rollWeather(null)];
     this.yesterday = 'sunny';
@@ -383,7 +414,8 @@ export class Game {
     this.money = s.money; this.rep = s.rep; this.day = s.day; this.up = { ...freshUp(), ...s.up };
     this.fuel = Math.min(this.fuelMax, s.fuel);
     this.canFuel = s.can === undefined ? this.fuelMax * CAN_FRACTION : s.can * this.fuelMax;
-    this.lots = this.world.lots.map((_, i) => ({ ...this.freshLot(), ...(s.lots[i] ?? {}) }));
+    const freshLots = this.freshLots();
+    this.lots = this.world.lots.map((_, i) => ({ ...freshLots[i], ...(s.lots[i] ?? {}) }));
     this.forecast = [...s.forecast, 'sunny', 'cloudy', 'sunny', 'sunny'].slice(0, 4) as Weather[];
     this.week = s.week ?? {};
     this.world.hedges.forEach((h, i) => { h.regrow = s.hedges[i] ?? 0; h.shaggy = h.regrow <= 0; });
@@ -500,11 +532,12 @@ export class Game {
     this.world.lots.forEach((lot, i) => {
       const st = this.lots[i];
       const mown = this.grass.count(lot.lawnCells) / lot.lawnCells.length >= 0.9;
-      st.level = mown ? 0.08 : Math.min(1, st.level + growth);
+      st.level = mown ? (st.overgrown ? 1.25 : 0.08) : Math.min(st.overgrown ? 1.6 : 1, st.level + growth);
       if (st.status === 'rival') {
         st.level = Math.min(st.level, 0.2);
         if (--st.rivalDays <= 0) {
           st.status = 'prospect';
+          if (st.overgrown) st.level = 1.25;
           st.grumpy = 0.1;
           if (this.open(lot)) this.notes.push(`🚩 #${lot.number} ${cap(lot.owner)} dropped ${RIVAL}. Go knock!`);
         }
@@ -647,8 +680,10 @@ export class Game {
       if (Math.abs(e.clientX - d.x) > 0) this.cam.turn(-(e.clientX - d.x) * 0.006);
       // tilt: raise or lower the camera a touch, clamped so you never end up under the ground
       const tilt = -(e.clientY - d.y) * 0.02;
-      this.cam.o.offset.y = clamp(this.cam.o.offset.y + tilt, 4.5, 20);
-      this.cam.o.offset.z = clamp(this.cam.o.offset.z - tilt * 0.35, 2.2, 12);
+      const yRange = this.cameraView === 'first' ? [1, 3.2] : this.cameraView === 'close' ? [4, 13] : [4.5, 20];
+      const zRange = this.cameraView === 'first' ? [-0.5, 1.8] : this.cameraView === 'close' ? [1.5, 8] : [2.2, 12];
+      this.cam.o.offset.y = clamp(this.cam.o.offset.y + tilt, yRange[0], yRange[1]);
+      this.cam.o.offset.z = clamp(this.cam.o.offset.z - tilt * 0.35, zRange[0], zRange[1]);
       d.x = e.clientX; d.y = e.clientY;
     });
     const end = (e: PointerEvent) => {
@@ -672,6 +707,7 @@ export class Game {
     if (code === 'KeyG') this.startPour();
     if (code === 'KeyL') this.toggleLoad();
     if (code === 'KeyH' && !this.tutorialOn) this.beginTutorial();
+    if (code === 'KeyV') this.cycleCameraView();
     if (code === 'KeyR' && this.orbitDrag === null) {
       // snap the view in behind whatever you're driving (or back to the default facing on foot)
       this.cam.snapAngle(this.mounted !== null ? this.active.yaw : 0);
@@ -679,6 +715,22 @@ export class Game {
     }
     if (code === 'KeyT') this.openTrailer();
   };
+
+  /** Cycle between the three camera framings in the order shown in the controls help. */
+  private cycleCameraView() {
+    this.cameraView = this.cameraView === 'far' ? 'close' : this.cameraView === 'close' ? 'first' : 'far';
+    const presets = {
+      far: { offset: [0, 4.6, 8.2], lookAhead: 2.5 },
+      close: { offset: [0, 7.8, 4.5], lookAhead: 1.6 },
+      first: { offset: [0, 1.7, 0.15], lookAhead: 10 },
+    } as const;
+    const preset = presets[this.cameraView];
+    this.cam.o.offset.set(preset.offset[0], preset.offset[1], preset.offset[2]);
+    this.cam.o.lookAhead = preset.lookAhead;
+    this.cam.pull = this.camPull();
+    this.camHoldT = 1.8;
+    this.hud.toast(`Camera: ${this.cameraView === 'far' ? 'third person (far)' : this.cameraView === 'close' ? 'third person (close & above)' : 'first person'}`, 'info', 1500);
+  }
 
   // ---------------------------------------------------------------- the rig (truck + trailer)
   /** Park the whole rig at a spot, with the trailer lined up behind the truck. */
@@ -926,7 +978,7 @@ export class Game {
       can: this.canFuel / Math.max(1, this.fuelMax),
       lots: this.lots.map((l) => ({
         status: l.status === 'job' || l.status === 'declined' ? 'prospect' : l.status,
-        grumpy: l.grumpy, pay: l.pay, days: l.days, services: l.services, strikes: l.strikes, good: l.good, rivalDays: l.rivalDays, level: l.level,
+        grumpy: l.grumpy, pay: l.pay, days: l.days, services: l.services, strikes: l.strikes, good: l.good, rivalDays: l.rivalDays, level: l.level, overgrown: l.overgrown,
       })),
     };
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(s)); } catch { /* storage blocked */ }
@@ -1092,12 +1144,16 @@ export class Game {
    * Vehicle controls: heading-relative throttle + steer, independent of the camera angle.
    * W / up is throttle forward, S / down is reverse, A / D steer left / right. Because the
    * camera can freely swing behind the vehicle without touching these, auto-follow can't
-   * mess the controls up. The touch stick maps the same way (push up to drive, left/right to steer).
+   * mess the controls up. A touch stick works the same way, while mobile also has separate hold
+   * pedals and steering buttons so both can be used at once without fighting a diagonal stick.
    */
   private driveInput() {
     const raw = this.controls.read();
-    if (raw.m < 0.02) return { ...raw, throttle: 0, steer: 0 };
-    return { ...raw, throttle: clamp(-raw.z, -1, 1), steer: clamp(raw.x, -1, 1) };
+    const left = this.touchDriveKeys.has('left'), right = this.touchDriveKeys.has('right');
+    const forward = this.touchDriveKeys.has('forward'), reverse = this.touchDriveKeys.has('reverse');
+    const throttle = forward || reverse ? Number(forward) - Number(reverse) : clamp(-raw.z, -1, 1);
+    const steer = left || right ? Number(right) - Number(left) : clamp(raw.x, -1, 1);
+    return { ...raw, throttle, steer, m: Math.max(raw.m, Math.abs(throttle), Math.abs(steer)) };
   }
 
   private play(dt: number, t: number) {
@@ -1129,6 +1185,7 @@ export class Game {
     const hit = this.mounted !== null && drv
       ? m.updateCar(dt, dry ? 0 : drv.throttle, dry ? 0 : drv.steer, this.world, this.boost ? 1.35 : 1, this.mounted === 'mower' ? 2.4 : 0)
       : m.update(dt, dry || !inp ? 0 : inp.x, dry || !inp ? 0 : inp.z, dry || !inp ? 0 : inp.m, this.world, this.boost ? 1.35 : 1);
+    if (this.mounted !== null && m.speed > 0.1) this.grass.press(m.x, m.z, m.vx, m.vz, this.mounted === 'rig' ? 1.7 : 1.2);
     this.bumpCd -= dt;
     if (hit.impact > 2.4 && this.bumpCd <= 0) this.bump(hit.impact, hit.nx, hit.nz);
     const maxSp = this.mounted === 'rig' ? RIG_SPEED : this.mounted === 'mower' ? this.speedMax : this.feet.o.maxSpeed;
@@ -1155,7 +1212,7 @@ export class Game {
       // can work on, so you never have to line it up by eye — this is also what makes the tools
       // usable at all, previously you had to be facing the exact spot.
       this.aimTool(dt);
-      if (this.controls.has('tool')) this.useTool(dt); else this.toolActive = false;
+      if (this.controls.has('tool') || this.touchToolHeld) this.useTool(dt); else this.toolActive = false;
     }
     this.updatePrompt();
     this.loadUpdate(dt);
@@ -1191,8 +1248,11 @@ export class Game {
     this.cam.setPull(this.camPull(), this.orbitDrag === null ? dt : 0);
   }
 
-  /** How far back and up the camera sits for what you're driving. */
-  private camPull() { return this.mounted === 'rig' ? 1.9 : this.mounted === 'mower' ? 1.4 : 0.95; }
+  /** How far back and up the camera sits for the active view and subject. */
+  private camPull() {
+    if (this.cameraView !== 'far') return 1;
+    return this.mounted === 'rig' ? 1.9 : this.mounted === 'mower' ? 1.4 : 0.95;
+  }
 
   // ---------------------------------------------------------------- on foot
   /** Rough walking: brush the hedges and kick up any leaves you scuff through. */
@@ -1475,6 +1535,7 @@ export class Game {
 
   /** Take a tool in hand (or put it away). */
   private pickTool(id: ToolId | null, quiet = false) {
+    this.touchToolHeld = false;
     this.tool = id;
     // take the old tool off the hand itself: removing it from the scene would leave it parented to
     // the arm, so every swap stacked another model on the walker's hand
@@ -1514,11 +1575,15 @@ export class Game {
     if (this.mounted === 'mower') {
       const mouth = this.rampMouth;
       const d = Math.hypot(this.mover.x - mouth.x, this.mover.z - mouth.z);
+      const cell = this.cellAt(this.mover.x, this.mover.z);
+      const owner = cell >= 0 ? this.world.owner[cell] : -1;
+      const tooTall = owner >= 0 && this.needsWeedeater(owner);
       this.hud.prompt(
-        this.atRamps() ? '🚜 <kbd>W</kbd> keep going — you\'re lined up with the ramps'
+        tooTall ? '🌾 Too tall for the mower deck — park, hop off, and take the weed eater from the trailer'
+        : this.atRamps() ? '🚜 <kbd>W</kbd> keep going — you\'re lined up with the ramps'
         : d < 9 ? '🪜 Back the trailer up here, then drive the mower up the ramps to load it'
         : null,
-        this.atRamps() ? 'ok' : 'info',
+        tooTall ? 'warn' : this.atRamps() ? 'ok' : 'info',
       );
       return;
     }
@@ -1569,12 +1634,13 @@ export class Game {
         if (d < R && d < bd) { bd = d; best = { x: l.x, z: l.z }; }
       }
     } else {
-      // weed eater: the nearest uncut edge cell
+      // Weed eater: the nearest uncut edging cell or tall overgrowth patch.
       const g0x = Math.floor((x - R - MIN_X) / CELL), g1x = Math.floor((x + R - MIN_X) / CELL);
       const g0z = Math.floor((z - R - MIN_Z) / CELL), g1z = Math.floor((z + R - MIN_Z) / CELL);
       for (let gz = Math.max(0, g0z); gz <= Math.min(GH - 1, g1z); gz++) for (let gx = Math.max(0, g0x); gx <= Math.min(GW - 1, g1x); gx++) {
-        const c = gz * GW + gx;
-        if (this.world.owner[c] < 0 || !this.world.edge[c] || this.grass.isCut(c)) continue;
+        const c = gz * GW + gx, owner = this.world.owner[c];
+        const tallPatch = this.world.kind[c] === K_LAWN && this.needsWeedeater(owner);
+        if (owner < 0 || (!this.world.edge[c] && !tallPatch) || this.grass.isCut(c)) continue;
         const d = Math.hypot(cellX(c) - x, cellZ(c) - z);
         if (d < R && d < bd) { bd = d; best = { x: cellX(c), z: cellZ(c) }; }
       }
@@ -1628,7 +1694,7 @@ export class Game {
     this.edgeCut(dt, def.reach);
   }
 
-  /** Cut edge cells around (x, z) — only cells whose lot actually booked edging. */
+  /** Cut edging cells and any tall lawn patches in reach. */
   private edgeCut(dt: number, R: number) {
     const f = this.feet;
     const g0x = Math.floor((f.x - R - MIN_X) / CELL), g1x = Math.floor((f.x + R - MIN_X) / CELL);
@@ -1637,9 +1703,12 @@ export class Game {
     for (let gz = Math.max(0, g0z); gz <= Math.min(GH - 1, g1z); gz++) for (let gx = Math.max(0, g0x); gx <= Math.min(GW - 1, g1x); gx++) {
       const c = gz * GW + gx;
       const owner = this.world.owner[c];
-      if (owner < 0 || !this.world.edge[c] || this.grass.isCut(c)) continue;
+      const tallPatch = this.world.kind[c] === K_LAWN && this.needsWeedeater(owner);
+      if (owner < 0 || (!this.world.edge[c] && !tallPatch) || this.grass.isCut(c)) continue;
       if (Math.hypot(cellX(c) - f.x, cellZ(c) - f.z) > R) continue;
-      if (this.grass.cutCell(c, (Math.floor(cellX(c)) & 1) === 0) === 'edge') { this.lots[owner].edgeCut++; n++; }
+      const cut = this.grass.cutCell(c, (Math.floor(cellX(c)) & 1) === 0);
+      if (cut === 'edge') { this.lots[owner].edgeCut++; n++; }
+      else if (cut === 'lawn') { this.lots[owner].cut++; n++; }
     }
     if (n > 0) {
       const fx = Math.sin(f.yaw), fz = Math.cos(f.yaw);
@@ -1746,6 +1815,11 @@ export class Game {
     return gx < 0 || gz < 0 || gx >= GW || gz >= GH ? -1 : gz * GW + gx;
   }
 
+  /** Thick, persistent overgrowth is above the mower deck's safe cut height. */
+  private needsWeedeater(lotId: number) {
+    return !!this.lots[lotId]?.overgrown;
+  }
+
   // ---------------------------------------------------------------- mowing
   /** Cut lawn and edge cells within `R` of (cx, cz); only lot `only` if given. Returns the count. */
   private cutDisc(cx: number, cz: number, R: number, light: boolean, only = -1) {
@@ -1756,6 +1830,7 @@ export class Game {
       const c = gz * GW + gx;
       const owner = this.world.owner[c];
       if (owner < 0 || (only >= 0 && owner !== only) || this.grass.isCut(c)) continue;
+      if (this.needsWeedeater(owner) && this.world.kind[c] === K_LAWN) continue;
       if (this.world.kind[c] !== K_LAWN && !this.world.edge[c]) continue;
       if (Math.hypot(cellX(c) - cx, cellZ(c) - cz) > R) continue;
       const k = this.grass.cutCell(c, light);
@@ -2196,7 +2271,7 @@ export class Game {
     const who = cap(lot.owner);
     const offer = st.offer ??= this.makeOffer(lot);
     const due = this.dueTime(lot, offer.services);
-    const svc = ['🌱 mow', offer.services.sweep && '🍂 clear leaves', offer.services.edge && '📏 edge the paths', offer.services.hedge && '✂️ trim hedges'].filter(Boolean).join(' · ');
+    const svc = ['🌱 mow', st.overgrown && '🌾 tall grass · weed eater only', offer.services.sweep && '🍂 clear leaves', offer.services.edge && '📏 edge the paths', offer.services.hedge && '✂️ trim hedges'].filter(Boolean).join(' · ');
     const load = offer.days.map((d) => {
       const n = this.lots.filter((l) => l.status === 'client' && l.days.includes(d)).length;
       return `${WEEKDAYS[d]} <small>(${n} booked)</small>`;
@@ -2321,7 +2396,8 @@ export class Game {
     const services: Services = { sweep: Math.random() < 0.5, edge: Math.random() < 0.45, hedge: Math.random() < 0.4 };
     const area = lot.lawnCells.length * CELL * CELL;
     const raw = 8 + area * 0.075 + (services.sweep ? 9 : 0) + (services.edge ? lot.edgeCells.length * 0.06 : 0) + (services.hedge ? 10 : 0);
-    const price = Math.round(raw * (0.85 + this.rep * 0.05) * (freq === 3 ? 0.9 : 1));
+    const overgrowthPremium = this.lots[lot.id].overgrown ? 3 : 1;
+    const price = Math.round(raw * overgrowthPremium * (0.85 + this.rep * 0.05) * (freq === 3 ? 0.9 : 1));
     return { price, days, services };
   }
 
@@ -2413,7 +2489,7 @@ export class Game {
     this.earnedToday += total;
     this.mownToday++;
     st.doneToday = true;
-    st.level = 0.08;
+    st.level = st.overgrown ? 1.25 : 0.08;
     this.week[`${this.weekday}:${lot.id}`] = 'done';
     if (++st.good >= 2 && st.strikes > 0) { st.strikes--; st.good = 0; }
     const firstTime = st.status === 'job';

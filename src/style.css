@@ -716,6 +716,47 @@ canvas { display: block; }
 .tut-buttons { display: flex; gap: 7px; margin-top: 12px; }
 
 /* ---------------------------------------------------------------------------
+   Mobile vehicle pedals and steering
+   --------------------------------------------------------------------------- */
+.drive-controls {
+  display: none; position: absolute; left: max(14px, env(safe-area-inset-left));
+  right: 108px; bottom: max(22px, env(safe-area-inset-bottom));
+  align-items: end; justify-content: space-between; pointer-events: none; touch-action: none;
+}
+.drive-controls.visible { display: flex; }
+.hud:not(.playing) .drive-controls { display: none; }
+.drive-group { display: flex; gap: 10px; pointer-events: auto; }
+.drive-btn {
+  display: grid; place-items: center; width: 62px; height: 62px; padding: 0;
+  border: 2px solid rgba(255,255,255,.68); border-radius: 50%;
+  background: rgba(22, 37, 29, .58); color: #fff; font-size: 24px; font-weight: 900;
+  box-shadow: var(--shadow-2); pointer-events: auto; touch-action: none; user-select: none;
+  -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+}
+.drive-btn.on { background: rgba(87, 172, 91, .9); transform: scale(.94); }
+.pedal-group .drive-forward { border-color: rgba(191, 244, 156, .9); }
+.pedal-group .drive-reverse { background: rgba(40, 46, 58, .68); }
+
+/* Mobile context actions: hop in/out, open the trailer, and hold to run a hand tool. */
+.mobile-actions {
+  display: none; position: absolute; right: 18px;
+  bottom: max(112px, calc(env(safe-area-inset-bottom) + 98px));
+  align-items: center; gap: 8px; pointer-events: none; touch-action: none;
+}
+.mobile-actions.visible { display: flex; }
+.hud:not(.playing) .mobile-actions { display: none; }
+.mobile-action {
+  display: grid; place-items: center; width: 52px; height: 52px; padding: 0;
+  border: 2px solid rgba(255,255,255,.7); border-radius: 50%;
+  background: rgba(22, 37, 29, .72); color: white; font-size: 17px; font-weight: 900;
+  box-shadow: var(--shadow-2); pointer-events: auto; touch-action: none; user-select: none;
+  -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+}
+.mobile-action.on { background: rgba(87, 172, 91, .9); transform: scale(.94); }
+.mobile-action.tool-action { display: none; }
+.mobile-action.tool-action.visible { display: grid; background: rgba(222, 150, 50, .82); }
+
+/* ---------------------------------------------------------------------------
    Touch boost
    --------------------------------------------------------------------------- */
 .boost-btn {

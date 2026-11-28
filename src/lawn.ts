@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { CELL, cellX, cellZ } from './config';
-import { LAWN_UNCUT, Lot, World, paintRect } from './world';
+import { BAND, CELL, GH, GW, MIN_X, PX, cellIndex, cellX, cellZ } from './config';
+import { Lot, World, paintRect } from './world';
+import { grassTintForCell } from './grass-color';
 
 const STUBBLE = 0.14;
 const STRIPE_LIGHT = ['rgba(143,200,98,0.78)', 'rgba(147,204,102,0.78)', 'rgba(138,196,94,0.78)'];
@@ -21,7 +22,12 @@ export class Grass {
   private h: Float32Array;
   private target: Float32Array;
   private hAttr: THREE.InstancedBufferAttribute;
+  private bendData: Float32Array;
+  private bendTarget: Float32Array;
+  private bendAttr: THREE.InstancedBufferAttribute;
+  private instanceYaw: Float32Array;
   private moving = new Set<number>();
+  private bending = new Set<number>();
   cut: Uint8Array;
   readonly time = { value: 0 };
   readonly wind = { value: 1 };
@@ -34,11 +40,14 @@ export class Grass {
     mat.onBeforeCompile = (sh) => {
       sh.uniforms.uTime = this.time;
       sh.uniforms.uWind = this.wind;
-      sh.vertexShader = 'attribute float aH;\nuniform float uTime;\nuniform float uWind;\n' + sh.vertexShader.replace('#include <begin_vertex>', `
+      sh.vertexShader = 'attribute float aH;\nattribute vec3 aBend;\nuniform float uTime;\nuniform float uWind;\n' + sh.vertexShader.replace('#include <begin_vertex>', `
         vec3 transformed = vec3(position);
-        transformed.y *= aH;
+        float lay = position.y * aH * aBend.z;
+        transformed.y *= aH * (1.0 - aBend.z * 0.86);
+        transformed.x += aBend.x * lay * 1.55;
+        transformed.z += aBend.y * lay * 1.55;
         float ph = uTime * (1.6 + uWind * 0.8) + instanceMatrix[3].x * 0.31 + instanceMatrix[3].z * 0.23;
-        float sway = (sin(ph) + 0.5 * sin(ph * 2.3) + (uWind - 1.0) * 0.8) * 0.05 * uWind * position.y * aH;
+        float sway = (sin(ph) + 0.5 * sin(ph * 2.3) + (uWind - 1.0) * 0.8) * 0.05 * uWind * position.y * aH * (1.0 - aBend.z * 0.75);
         transformed.x += sway; transformed.z += sway * 0.6;`);
     };
     const geo = tuftGeometry();
@@ -47,6 +56,12 @@ export class Grass {
     this.hAttr = new THREE.InstancedBufferAttribute(this.h, 1);
     this.hAttr.setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute('aH', this.hAttr);
+    this.bendData = new Float32Array(n * 3);
+    this.bendTarget = new Float32Array(n);
+    this.instanceYaw = new Float32Array(n);
+    this.bendAttr = new THREE.InstancedBufferAttribute(this.bendData, 3);
+    this.bendAttr.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('aBend', this.bendAttr);
     this.mesh = new THREE.InstancedMesh(geo, mat, n);
     this.mesh.receiveShadow = true;
     this.mesh.frustumCulled = false;
@@ -57,13 +72,21 @@ export class Grass {
     let k = 0;
     const place = (c: number, edge: boolean) => {
       this.slot[c] = k;
+      const tint = grassTintForCell(c, world.kind, world.owner);
+      const hsl = tint.getHSL({ h: 0, s: 0, l: 0 });
       for (let t = 0; t < perCell; t++, k++) {
         p.set(cellX(c) + (Math.random() - 0.5) * CELL * 0.8, 0, cellZ(c) + (Math.random() - 0.5) * CELL * 0.8);
-        q.setFromAxisAngle(up, Math.random() * Math.PI * 2);
+        const yaw = Math.random() * Math.PI * 2;
+        q.setFromAxisAngle(up, yaw);
+        this.instanceYaw[k] = yaw;
         const sc = (edge ? 0.6 : 0.85) + Math.random() * 0.4;
         s.set(sc, sc * (0.85 + Math.random() * 0.35), sc);
         this.mesh.setMatrixAt(k, m.compose(p, q, s));
-        col.setHSL(0.24 + Math.random() * 0.06, 0.5 + Math.random() * 0.15, 0.3 + Math.random() * 0.08);
+        col.setHSL(
+          hsl.h + (Math.random() - 0.5) * 0.012,
+          Math.max(0.38, Math.min(0.72, hsl.s + (Math.random() - 0.5) * 0.1)),
+          Math.max(0.22, Math.min(0.48, hsl.l + (Math.random() - 0.5) * 0.08)),
+        );
         this.mesh.setColorAt(k, col);
       }
     };
@@ -87,9 +110,49 @@ export class Grass {
     return 'lawn';
   }
 
-  private paintCell(c: number, color: string) {
+  private paintCell(c: number, color: string | THREE.Color) {
     const x = cellX(c) - CELL / 2, z = cellZ(c) - CELL / 2;
-    paintRect(this.world, { minX: x, maxX: x + CELL, minZ: z, maxZ: z + CELL }, color);
+    if (typeof color === 'string') {
+      paintRect(this.world, { minX: x, maxX: x + CELL, minZ: z, maxZ: z + CELL }, color);
+      return;
+    }
+    for (const g of this.world.grounds) {
+      const z0 = Math.max(z, g.minZ), z1 = Math.min(z + CELL, g.minZ + 2 * BAND);
+      if (z1 <= z0) continue;
+      g.ctx.fillStyle = color.getStyle(THREE.SRGBColorSpace);
+      g.ctx.globalAlpha = 0.82;
+      g.ctx.fillRect((x - MIN_X) * PX, (z0 - g.minZ) * PX, CELL * PX, (z1 - z0) * PX);
+      g.ctx.globalAlpha = 1;
+      g.dirty = true;
+    }
+  }
+
+  /** Push grass over beneath a moving vehicle; the bend eases back upright after it passes. */
+  press(x: number, z: number, vx: number, vz: number, radius = 1.2) {
+    const speed = Math.hypot(vx, vz);
+    const center = cellIndex(x, z);
+    if (speed < 0.1 || center < 0) return;
+    const gx0 = center % GW, gz0 = Math.floor(center / GW), reach = Math.ceil(radius / CELL);
+    const dx = vx / speed, dz = vz / speed;
+    let changed = false;
+    for (let gz = Math.max(0, gz0 - reach); gz <= Math.min(GH - 1, gz0 + reach); gz++) {
+      for (let gx = Math.max(0, gx0 - reach); gx <= Math.min(GW - 1, gx0 + reach); gx++) {
+        const c = gz * GW + gx, k0 = this.slot[c];
+        if (k0 < 0) continue;
+        const d = Math.hypot(cellX(c) - x, cellZ(c) - z);
+        if (d > radius) continue;
+        const amount = 0.35 + 0.65 * (1 - d / radius);
+        for (let t = 0; t < this.perCell; t++) {
+          const k = k0 + t, yaw = this.instanceYaw[k], co = Math.cos(yaw), si = Math.sin(yaw), i = k * 3;
+          this.bendData[i] = co * dx - si * dz;
+          this.bendData[i + 1] = si * dx + co * dz;
+          this.bendTarget[k] = Math.max(this.bendTarget[k], amount);
+          this.bending.add(k);
+        }
+        changed = true;
+      }
+    }
+    if (changed) this.bendAttr.needsUpdate = true;
   }
 
   /**
@@ -99,7 +162,7 @@ export class Grass {
   growLot(lot: Lot, level: number) {
     const hLawn = Math.max(0.3, level), hEdge = Math.min(1, 0.25 + level);
     for (const c of lot.lawnCells) {
-      if (this.cut[c] && level >= 0.5) this.paintCell(c, LAWN_UNCUT);
+      if (this.cut[c] && level >= 0.5) this.paintCell(c, grassTintForCell(c, this.world.kind, this.world.owner));
       this.cut[c] = 0;
       this.setCell(c, hLawn);
     }
@@ -116,13 +179,27 @@ export class Grass {
 
   update(dt: number, t: number) {
     this.time.value = t;
-    if (!this.moving.size) return;
-    const k = Math.min(1, dt * 16);
-    for (const i of this.moving) {
-      this.h[i] += (this.target[i] - this.h[i]) * k;
-      if (Math.abs(this.h[i] - this.target[i]) < 0.01) { this.h[i] = this.target[i]; this.moving.delete(i); }
+    if (this.moving.size) {
+      const k = Math.min(1, dt * 16);
+      for (const i of this.moving) {
+        this.h[i] += (this.target[i] - this.h[i]) * k;
+        if (Math.abs(this.h[i] - this.target[i]) < 0.01) { this.h[i] = this.target[i]; this.moving.delete(i); }
+      }
+      this.hAttr.needsUpdate = true;
     }
-    this.hAttr.needsUpdate = true;
+    if (this.bending.size) {
+      const follow = Math.min(1, dt * 12), release = Math.exp(-dt * 1.8);
+      for (const i of this.bending) {
+        const j = i * 3 + 2;
+        this.bendTarget[i] *= release;
+        this.bendData[j] += (this.bendTarget[i] - this.bendData[j]) * follow;
+        if (this.bendTarget[i] < 0.008 && this.bendData[j] < 0.015) {
+          this.bendTarget[i] = this.bendData[j] = 0;
+          this.bending.delete(i);
+        }
+      }
+      this.bendAttr.needsUpdate = true;
+    }
   }
 
   /** Push painted stripes to the GPU, one street band at a time (throttled by the caller). */
@@ -131,14 +208,14 @@ export class Grass {
   }
 }
 
-/** Five thin blades fanned around the origin; normals all point up so the grass lights evenly. */
+/** Eight fine blades fanned around each tuft; varied footprints help the lawn read as continuous. */
 function tuftGeometry() {
   const pos: number[] = [], col: number[] = [], nrm: number[] = [];
-  for (let b = 0; b < 5; b++) {
-    const a = (b / 5) * Math.PI * 2 + Math.random() * 0.6;
-    const r = 0.05 + Math.random() * 0.09;
+  for (let b = 0; b < 8; b++) {
+    const a = (b / 8) * Math.PI * 2 + Math.random() * 0.7;
+    const r = 0.035 + Math.random() * 0.12;
     const ox = Math.cos(a) * r, oz = Math.sin(a) * r;
-    const w = 0.055, h = 0.36 + Math.random() * 0.18, lean = 0.1;
+    const w = 0.045, h = 0.32 + Math.random() * 0.26, lean = 0.12;
     const wx = -Math.sin(a) * w, wz = Math.cos(a) * w;
     pos.push(ox - wx, 0, oz - wz, ox + wx, 0, oz + wz, ox + Math.cos(a) * lean, h, oz + Math.sin(a) * lean);
     col.push(0.5, 0.55, 0.45, 0.5, 0.55, 0.45, 1.25, 1.25, 1.1);

@@ -85,8 +85,16 @@ export class Hud {
   private promptEl: HTMLDivElement;
   private overlay: HTMLDivElement;
   private dialogKeys: DialogOption[] = [];
+  private driveControls: HTMLDivElement | null = null;
+  private mobileActions: HTMLDivElement | null = null;
+  private mobileToolButton: HTMLButtonElement | null = null;
 
-  constructor(parent: HTMLElement, isTouch: boolean, onBoost: (b: boolean) => void, onPause: () => void, onSchedule: () => void) {
+  constructor(
+    parent: HTMLElement, isTouch: boolean, onBoost: (b: boolean) => void,
+    onPause: () => void, onSchedule: () => void,
+    onDriveControl: (key: 'left' | 'right' | 'forward' | 'reverse', down: boolean) => void,
+    onMobileAction: (key: 'mount' | 'trailer' | 'tool', down: boolean) => void,
+  ) {
     this.root = h('div', 'hud');
     parent.appendChild(this.root);
     const tl = h('div', 'panel tl');
@@ -117,6 +125,67 @@ export class Hud {
     this.overlay = h('div', 'overlay hidden');
     this.root.append(tl, this.jobs, tr, this.promptEl, this.toasts, this.overlay);
     if (isTouch) {
+      const pad = h('div', 'drive-controls');
+      const steer = h('div', 'drive-group steer-group');
+      const pedals = h('div', 'drive-group pedal-group');
+      const addDriveButton = (group: HTMLElement, cls: string, label: string, key: 'left' | 'right' | 'forward' | 'reverse') => {
+        const button = h('button', `drive-btn ${cls}`, label);
+        button.setAttribute('aria-label', key);
+        const down = (e: PointerEvent) => {
+          e.preventDefault(); e.stopPropagation();
+          button.classList.add('on');
+          onDriveControl(key, true);
+          button.setPointerCapture(e.pointerId);
+        };
+        const up = (e: PointerEvent) => {
+          e.preventDefault(); e.stopPropagation();
+          button.classList.remove('on');
+          onDriveControl(key, false);
+          if (button.hasPointerCapture(e.pointerId)) button.releasePointerCapture(e.pointerId);
+        };
+        button.addEventListener('pointerdown', down);
+        button.addEventListener('pointerup', up);
+        button.addEventListener('pointercancel', up);
+        button.addEventListener('lostpointercapture', up);
+        group.appendChild(button);
+      };
+      addDriveButton(steer, 'steer-left', '◀', 'left');
+      addDriveButton(steer, 'steer-right', '▶', 'right');
+      addDriveButton(pedals, 'drive-forward', '▲', 'forward');
+      addDriveButton(pedals, 'drive-reverse', '▼', 'reverse');
+      pad.append(steer, pedals);
+      this.driveControls = pad;
+      this.root.appendChild(pad);
+
+      const actions = h('div', 'mobile-actions');
+      const addActionButton = (label: string, key: 'mount' | 'trailer' | 'tool', hold: boolean) => {
+        const button = h('button', `mobile-action${key === 'tool' ? ' tool-action' : ''}`, label);
+        button.setAttribute('aria-label', key === 'mount' ? 'Mount or dismount' : key === 'trailer' ? 'Trailer and equipment' : 'Run tool');
+        const down = (e: PointerEvent) => {
+          e.preventDefault(); e.stopPropagation();
+          button.classList.add('on');
+          onMobileAction(key, true);
+          button.setPointerCapture(e.pointerId);
+        };
+        const up = (e: PointerEvent) => {
+          e.preventDefault(); e.stopPropagation();
+          button.classList.remove('on');
+          if (hold) onMobileAction(key, false);
+          if (button.hasPointerCapture(e.pointerId)) button.releasePointerCapture(e.pointerId);
+        };
+        button.addEventListener('pointerdown', down);
+        button.addEventListener('pointerup', up);
+        button.addEventListener('pointercancel', up);
+        button.addEventListener('lostpointercapture', up);
+        actions.appendChild(button);
+        return button;
+      };
+      addActionButton('E', 'mount', false);
+      addActionButton('T', 'trailer', false);
+      this.mobileToolButton = addActionButton('F', 'tool', true);
+      this.mobileActions = actions;
+      this.root.appendChild(actions);
+
       const b = h('button', 'boost-btn', '⚡');
       const on = (v: boolean) => (e: Event) => { e.preventDefault(); e.stopPropagation(); b.classList.toggle('on', v); onBoost(v); };
       b.addEventListener('pointerdown', on(true));
@@ -162,6 +231,9 @@ export class Hud {
     chips.push(`<span class="chip-mode"><span class="k">E</span> ${d.mounted ? 'get off' : 'climb on'}</span>`);
     if (d.stranded) chips.push('<span class="chip-mode warn">⛽ stranded — follow the arrow</span>');
     this.modeEl.innerHTML = chips.join('');
+    if (this.driveControls) this.driveControls.classList.toggle('visible', d.mounted !== null);
+    if (this.mobileActions) this.mobileActions.classList.add('visible');
+    if (this.mobileToolButton) this.mobileToolButton.classList.toggle('visible', d.mounted === null && !!d.tool);
     if (!d.jobs.length) {
       this.jobs.innerHTML = '<div class="jobs-title">Today\'s schedule</div>' + (d.regulars
         ? '<div class="hint">✅ Nothing left on today\'s schedule. Knock on doors marked <b>!</b> to grow the business.</div>'
@@ -297,6 +369,7 @@ export class Hud {
   /** The full controls sheet, openable from the pause menu, the title (and after skipping the tour). */
   controls(onClose: () => void) {
     const rows: [string, string][] = [
+      ['Mobile', 'Hold ◀ / ▶ to steer and ▲ / ▼ to drive; use E / T for nearby actions and hold F to run a tool'],
       ['WASD / arrows', 'Drive, or walk on foot'],
       ['Shift', 'Full throttle'],
       ['E', 'Climb into the nearest vehicle / hop out'],
@@ -305,6 +378,7 @@ export class Hud {
       ['L', 'Ramps down / winch the mower on (or drive it up yourself)'],
       ['T', 'Trailer menu: swap tools'],
       ['G', 'Pour the spare fuel can'],
+      ['V', 'Cycle camera: third person (far), third person (close & above), first person'],
       ['Middle-drag', 'Orbit the camera (Shift+drag also works). In vehicles it swings in behind you while driving forward; on foot it holds still until you move it.'],
       ['R', 'Snap the camera in behind you'],
       ['C', 'Schedule'],
