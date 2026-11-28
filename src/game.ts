@@ -589,6 +589,7 @@ export class Game {
       this.sfx.muted,
       () => { this.save(); this.showTitle(); },
       () => { this.hud.controls(() => { this.phase = 'play'; this.pause(); }); },
+      { dayLabel: WEEKDAYS[this.weekday], hour: this.hour, money: this.money, rep: this.rep },
     );
   }
 
