@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { AABB, makeRng } from '../engine/src';
 import { garageTexture, grassTexture, pavingTexture, shingleTexture, sidingTexture, texMat, woodTexture } from './textures';
+import { grassTintForCell } from './grass-color';
 import {
   BAND, CELL, CROSS_X0, CROSS_X1, GH, GW, HEDGE_D0, HOUSE_D0, HOUSE_D1, K_BED, K_LAWN, K_NONE, K_PAVED, LOT_D1, LOT_W,
   LOTS_PER_SIDE, MAX_X, MAX_Z, MIN_X, MIN_Z, OWNERS, PUMP, PX, ROAD, STREETS, STREET_END, WALK, streetZ,
@@ -82,8 +83,6 @@ export interface World {
   sky: THREE.Mesh;
   clouds: THREE.Sprite[];
 }
-
-export const LAWN_UNCUT = 'rgba(61,106,42,0.82)';
 
 export function toWorld(lot: Lot, lx: number, d: number) {
   return lot.side > 0 ? { x: lot.x0 + lx, z: lot.zc + d } : { x: lot.x0 + LOT_W - lx, z: lot.zc - d };
@@ -313,7 +312,7 @@ export function buildWorld(seed = 1): World {
     mesh.receiveShadow = true;
     scene.add(mesh);
   }
-  paintGround({ grounds }, lots, kind, rng);
+  paintGround({ grounds }, lots, kind, owner, rng);
 
   // a big grass apron under the whole map so the horizon is turf, not a hard edge
   {
@@ -409,7 +408,7 @@ function classify(lot: Lot, lx: number, d: number, blockers: { lot: Lot; lx: num
  * surface detail (asphalt grain, paving joints, brick courses) drawn procedurally, then the lots are
  * laid over the top.
  */
-function paintGround(w: { grounds: Ground[] }, lots: Lot[], kind: Uint8Array, rng: () => number) {
+function paintGround(w: { grounds: Ground[] }, lots: Lot[], kind: Uint8Array, owner: Int16Array, rng: () => number) {
   const rect = (b: AABB, color: string) => paintRect(w, b, color);
   for (const g of w.grounds) {
     const W = g.canvas.width, H = g.canvas.height;
@@ -503,7 +502,6 @@ function paintGround(w: { grounds: Ground[] }, lots: Lot[], kind: Uint8Array, rn
   for (let z = -ROAD; z < lastZ; z += 4) rect({ minX: (CROSS_X0 + CROSS_X1) / 2 - 0.08, maxX: (CROSS_X0 + CROSS_X1) / 2 + 0.08, minZ: z, maxZ: z + 2 }, '#e8c547');
 
   for (const lot of lots) {
-    rect(rectWorld(lot, [0, LOT_W, WALK, LOT_D1]), LAWN_UNCUT);
     const dr = rectWorld(lot, lot.drive);
     rect(dr, '#a8a49b');
     detail(dr, 'paving');
@@ -512,6 +510,22 @@ function paintGround(w: { grounds: Ground[] }, lots: Lot[], kind: Uint8Array, rn
     detail(p, 'path');
     for (let z = p.minZ; z < p.maxZ; z += 0.7) rect({ minX: p.minX, maxX: p.maxX, minZ: z, maxZ: z + 0.1 }, 'rgba(60,40,25,0.14)');
     for (const b of lot.beds) rect(rectWorld(lot, b), '#5b3a22');
+  }
+  // Cell-level lawn tint gives each yard its own green, with a soft color handoff at shared edges.
+  for (const lot of lots) for (const c of lot.lawnCells) {
+    const gx = c % GW, gz = Math.floor(c / GW);
+    const x = gx * CELL * PX;
+    const z = MIN_Z + gz * CELL;
+    const tint = grassTintForCell(c, kind, owner);
+    for (const g of w.grounds) {
+      if (z < g.minZ || z >= g.minZ + BAND * 2) continue;
+      g.ctx.fillStyle = tint.getStyle(THREE.SRGBColorSpace);
+      g.ctx.globalAlpha = 0.82;
+      g.ctx.fillRect(x, (z - g.minZ) * PX, CELL * PX + 0.5, CELL * PX + 0.5);
+      g.ctx.globalAlpha = 1;
+      g.dirty = true;
+      break;
+    }
   }
   // grass tufts: little darker clumps so the lawn isn't a flat green
   for (let i = 0; i < kind.length; i++) {
