@@ -3,21 +3,39 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { BAND, CELL, GH, GW, MIN_X, PX, cellIndex, cellX, cellZ } from './config';
 import { Lot, World, paintRect } from './world';
 import { grassTintForCell } from './grass-color';
+import { grassTexture } from './textures';
 
-const STUBBLE = 0.14;
-const STRIPE_LIGHT = ['rgba(143,200,98,0.78)', 'rgba(147,204,102,0.78)', 'rgba(138,196,94,0.78)'];
-const STRIPE_DARK = ['rgba(98,153,63,0.82)', 'rgba(94,154,60,0.82)', 'rgba(102,160,67,0.82)'];
+const STUBBLE = 0;
+let cutTurfMap: THREE.Texture | null = null;
+
+function cutTurfTexture() {
+  if (!cutTurfMap) {
+    cutTurfMap = new THREE.TextureLoader().load('/textures/cut-turf.jpeg');
+    cutTurfMap.colorSpace = THREE.SRGBColorSpace;
+    cutTurfMap.wrapS = cutTurfMap.wrapT = THREE.RepeatWrapping;
+    cutTurfMap.anisotropy = 8;
+  }
+  return cutTurfMap;
+}
 
 export type CutKind = 'lawn' | 'edge' | null;
 
 /**
  * Lawn cells hold instanced grass tufts; so do "edge" cells (paving along the lawn's border, where
- * grass creeps over). Cutting a lawn cell shrinks it to stubble and paints a mow stripe, light or
- * dark by direction of travel; cutting an edge cell clears the creep entirely. Tuft heights live in
- * a per-instance attribute, scaled and swayed by a shader patch.
+ * grass creeps over). Cutting a lawn cell hides its blades to reveal a smooth, subtly striped turf
+ * layer; cutting an edge cell clears the creep entirely. Tuft heights live in a per-instance
+ * attribute, scaled and swayed by a shader patch.
  */
 export class Grass {
   mesh: THREE.InstancedMesh;
+  /** Continuous turf texture under every lawn blade; cut cells lift this layer slightly. */
+  private cutTurf: THREE.InstancedMesh;
+  /** Fine short-grass surface shown over cells after mowing. */
+  private cutSurface: THREE.InstancedMesh;
+  private surfaceSlot: Int32Array;
+  private surfaceMatrix = new THREE.Matrix4();
+  private surfaceColor = new THREE.Color();
+  private hiddenSurfaceMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
   private slot: Int32Array;
   private h: Float32Array;
   private target: Float32Array;
@@ -40,7 +58,8 @@ export class Grass {
     mat.onBeforeCompile = (sh) => {
       sh.uniforms.uTime = this.time;
       sh.uniforms.uWind = this.wind;
-      sh.vertexShader = 'attribute float aH;\nattribute vec3 aBend;\nuniform float uTime;\nuniform float uWind;\n' + sh.vertexShader.replace('#include <begin_vertex>', `
+      sh.vertexShader = 'attribute float aH;\nattribute vec3 aBend;\nuniform float uTime;\nuniform float uWind;\nvarying float vGrassHeight;\n' + sh.vertexShader.replace('#include <begin_vertex>', `
+        vGrassHeight = aH;
         vec3 transformed = vec3(position);
         float lay = position.y * aH * aBend.z;
         transformed.y *= aH * (1.0 - aBend.z * 0.86);
@@ -49,6 +68,9 @@ export class Grass {
         float ph = uTime * (1.6 + uWind * 0.8) + instanceMatrix[3].x * 0.31 + instanceMatrix[3].z * 0.23;
         float sway = (sin(ph) + 0.5 * sin(ph * 2.3) + (uWind - 1.0) * 0.8) * 0.05 * uWind * position.y * aH * (1.0 - aBend.z * 0.75);
         transformed.x += sway; transformed.z += sway * 0.6;`);
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying float vGrassHeight;')
+        .replace('#include <color_fragment>', 'if (vGrassHeight < 0.02) discard;\n#include <color_fragment>');
     };
     const geo = tuftGeometry();
     this.h = new Float32Array(n).fill(1);
@@ -65,6 +87,46 @@ export class Grass {
     this.mesh = new THREE.InstancedMesh(geo, mat, n);
     this.mesh.receiveShadow = true;
     this.mesh.frustumCulled = false;
+    const turfGeo = new THREE.PlaneGeometry(CELL, CELL);
+    turfGeo.rotateX(-Math.PI / 2);
+    const turfMaterial = new THREE.MeshStandardMaterial({ map: cutTurfTexture(), color: '#ffffff', roughness: 1, metalness: 0 });
+    turfMaterial.onBeforeCompile = (shader) => {
+      // Sample the reference turf in continuous world-space UVs so the image flows across cut cells
+      // instead of restarting as a little square texture on every half-metre tile.
+      shader.vertexShader = shader.vertexShader.replace('#include <uv_vertex>', `#include <uv_vertex>
+        #ifdef USE_MAP
+          vMapUv = (modelMatrix * instanceMatrix * vec4(position, 1.0)).xz * 0.55;
+        #endif`);
+    };
+    this.cutTurf = new THREE.InstancedMesh(turfGeo, turfMaterial, lawn.length);
+    this.cutTurf.receiveShadow = true;
+    this.cutTurf.frustumCulled = false;
+    this.cutTurf.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    const shortMaterial = new THREE.MeshStandardMaterial({ map: grassTexture(), color: '#ffffff', roughness: 1, metalness: 0 });
+    shortMaterial.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace('#include <uv_vertex>', `#include <uv_vertex>
+        #ifdef USE_MAP
+          vMapUv = (modelMatrix * instanceMatrix * vec4(position, 1.0)).xz * 0.75;
+        #endif`);
+    };
+    this.cutSurface = new THREE.InstancedMesh(turfGeo, shortMaterial, lawn.length);
+    this.cutSurface.receiveShadow = true;
+    this.cutSurface.frustumCulled = false;
+    this.cutSurface.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.surfaceSlot = new Int32Array(world.kind.length).fill(-1);
+    const initialTurf = new THREE.Color('#ffffff'), baseTurfMatrix = new THREE.Matrix4();
+    const hiddenSurface = this.hiddenSurfaceMatrix;
+    lawn.forEach((cell, i) => {
+      this.surfaceSlot[cell] = i;
+      this.cutTurf.setMatrixAt(i, baseTurfMatrix.makeTranslation(cellX(cell), 0.008, cellZ(cell)));
+      this.cutTurf.setColorAt(i, initialTurf);
+      this.cutSurface.setMatrixAt(i, hiddenSurface);
+      this.cutSurface.setColorAt(i, initialTurf);
+    });
+    this.cutTurf.instanceMatrix.needsUpdate = true;
+    if (this.cutTurf.instanceColor) this.cutTurf.instanceColor.needsUpdate = true;
+    this.cutSurface.instanceMatrix.needsUpdate = true;
+    if (this.cutSurface.instanceColor) this.cutSurface.instanceColor.needsUpdate = true;
     this.slot = new Int32Array(world.kind.length).fill(-1);
     this.cut = new Uint8Array(world.kind.length);
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
@@ -92,10 +154,41 @@ export class Grass {
     };
     for (const c of lawn) place(c, false);
     for (const c of edges) place(c, true);
-    world.scene.add(this.mesh);
+    world.scene.add(this.mesh, this.cutTurf, this.cutSurface);
   }
 
   isCut(cell: number) { return this.cut[cell] === 1; }
+
+  /** Current average height multiplier for the cell, sampled before a cut changes it. */
+  heightAt(cell: number) {
+    const first = this.slot[cell];
+    if (first < 0) return 0;
+    let total = 0;
+    for (let i = 0; i < this.perCell; i++) total += this.h[first + i];
+    return total / this.perCell;
+  }
+
+  private showCutTurf(cell: number, light: boolean) {
+    const i = this.surfaceSlot[cell];
+    if (i < 0) return;
+    this.cutSurface.setMatrixAt(i, this.surfaceMatrix.makeTranslation(cellX(cell), 0.02, cellZ(cell)));
+    this.cutSurface.setColorAt(i, this.surfaceColor.set(light ? '#ffffff' : '#d9e8c8'));
+    this.cutSurface.instanceMatrix.addUpdateRange(i * 16, 16);
+    this.cutSurface.instanceColor?.addUpdateRange(i * 3, 3);
+    this.cutSurface.instanceMatrix.needsUpdate = true;
+    if (this.cutSurface.instanceColor) this.cutSurface.instanceColor.needsUpdate = true;
+  }
+
+  private hideCutTurf(cell: number) {
+    const i = this.surfaceSlot[cell];
+    if (i < 0) return;
+    this.cutSurface.setMatrixAt(i, this.hiddenSurfaceMatrix);
+    this.cutSurface.setColorAt(i, this.surfaceColor.set('#ffffff'));
+    this.cutSurface.instanceMatrix.addUpdateRange(i * 16, 16);
+    this.cutSurface.instanceColor?.addUpdateRange(i * 3, 3);
+    this.cutSurface.instanceMatrix.needsUpdate = true;
+    if (this.cutSurface.instanceColor) this.cutSurface.instanceColor.needsUpdate = true;
+  }
 
   /** Cut one lawn or edge cell. `light` picks the stripe shade. Returns what was cut, or null. */
   cutCell(cell: number, light: boolean): CutKind {
@@ -105,8 +198,10 @@ export class Grass {
     const edge = this.world.edge[cell] === 1;
     for (let t = 0; t < this.perCell; t++) { this.target[k + t] = edge ? 0 : STUBBLE; this.moving.add(k + t); }
     if (edge) return 'edge';
-    const shades = light ? STRIPE_LIGHT : STRIPE_DARK;
-    this.paintCell(cell, shades[cell % shades.length]);
+    const turf = grassTintForCell(cell, this.world.kind, this.world.owner);
+    turf.lerp(new THREE.Color(light ? '#82aa5e' : '#3d682f'), 0.2);
+    this.showCutTurf(cell, light);
+    this.paintCell(cell, turf);
     return 'lawn';
   }
 
@@ -163,6 +258,7 @@ export class Grass {
     const hLawn = Math.max(0.3, level), hEdge = Math.min(1, 0.25 + level);
     for (const c of lot.lawnCells) {
       if (this.cut[c] && level >= 0.5) this.paintCell(c, grassTintForCell(c, this.world.kind, this.world.owner));
+      if (this.cut[c]) this.hideCutTurf(c);
       this.cut[c] = 0;
       this.setCell(c, hLawn);
     }
@@ -210,21 +306,39 @@ export class Grass {
 
 /** Eight fine blades fanned around each tuft; varied footprints help the lawn read as continuous. */
 function tuftGeometry() {
-  const pos: number[] = [], col: number[] = [], nrm: number[] = [];
-  for (let b = 0; b < 8; b++) {
-    const a = (b / 8) * Math.PI * 2 + Math.random() * 0.7;
-    const r = 0.035 + Math.random() * 0.12;
+  const pos: number[] = [], col: number[] = [];
+  const vertex = (x: number, y: number, z: number, shade: number) => {
+    pos.push(x, y, z);
+    col.push(shade * 0.78, shade, shade * 0.68);
+  };
+  // Narrow, gently curved blades with a tapered tip read more like turf than flat triangular flags.
+  for (let b = 0; b < 7; b++) {
+    const a = (b / 7) * Math.PI * 2 + Math.random() * 0.65;
+    const r = 0.025 + Math.random() * 0.12;
     const ox = Math.cos(a) * r, oz = Math.sin(a) * r;
-    const w = 0.045, h = 0.32 + Math.random() * 0.26, lean = 0.12;
-    const wx = -Math.sin(a) * w, wz = Math.cos(a) * w;
-    pos.push(ox - wx, 0, oz - wz, ox + wx, 0, oz + wz, ox + Math.cos(a) * lean, h, oz + Math.sin(a) * lean);
-    col.push(0.5, 0.55, 0.45, 0.5, 0.55, 0.45, 1.25, 1.25, 1.1);
-    nrm.push(0, 1, 0, 0, 1, 0, 0, 1, 0);
+    const h = 0.34 + Math.random() * 0.3;
+    const lean = 0.08 + Math.random() * 0.16;
+    const sideX = -Math.sin(a), sideZ = Math.cos(a);
+    const bend = (Math.random() - 0.5) * 0.07;
+    const bx = ox + Math.cos(a) * lean * 0.36 + sideX * bend;
+    const bz = oz + Math.sin(a) * lean * 0.36 + sideZ * bend;
+    const tx = ox + Math.cos(a) * lean, tz = oz + Math.sin(a) * lean;
+    const w0 = 0.014 + Math.random() * 0.008, w1 = w0 * 0.58;
+    const p0L: [number, number, number] = [ox - sideX * w0, 0, oz - sideZ * w0];
+    const p0R: [number, number, number] = [ox + sideX * w0, 0, oz + sideZ * w0];
+    const p1L: [number, number, number] = [bx - sideX * w1, h * 0.56, bz - sideZ * w1];
+    const p1R: [number, number, number] = [bx + sideX * w1, h * 0.56, bz + sideZ * w1];
+    const tip: [number, number, number] = [tx, h, tz];
+    const baseShade = 0.66 + Math.random() * 0.26, tipShade = 0.94 + Math.random() * 0.18;
+    // Lower half of the blade, then its tapered upper half. Duplicate vertices keep crisp blade faces.
+    vertex(...p0L, baseShade); vertex(...p0R, baseShade); vertex(...p1L, baseShade * 0.9);
+    vertex(...p1L, baseShade * 0.9); vertex(...p0R, baseShade); vertex(...p1R, baseShade * 0.9);
+    vertex(...p1L, baseShade * 0.9); vertex(...p1R, baseShade * 0.9); vertex(...tip, tipShade);
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+  g.computeVertexNormals();
   return g;
 }
 
@@ -457,6 +571,192 @@ export class Leaves {
     }
     this.mesh.instanceMatrix.needsUpdate = true;
   }
+}
+
+export interface ClippingSave { x: number; z: number; lot: number; size: number; yaw: number }
+
+interface Clipping extends ClippingSave {
+  alive: boolean;
+  y: number; vy: number;
+  vx: number; vz: number;
+}
+
+/**
+ * Fresh mower clippings. They fly out of the discharge chute, settle into visible little green
+ * piles, and remain until a blower or rake clears them. The mower deck kicks them sideways when
+ * driven over, just as it does with loose grass in the yard.
+ */
+export class Clippings {
+  static readonly MAX = 15000;
+  static readonly YIELD_MULTIPLIER = 3;
+  /** A yard only needs a cleanup pass when the loose clippings have built up into a real mess. */
+  static readonly CLEANUP_MIN = 90;
+  readonly mesh: THREE.InstancedMesh;
+  readonly list: Clipping[] = [];
+  private matrix = new THREE.Matrix4();
+  private quaternion = new THREE.Quaternion();
+  private position = new THREE.Vector3();
+  private scale = new THREE.Vector3();
+  private palette = ['#85a742', '#a2b957', '#6f9138', '#b1be62'];
+
+  constructor(world: World) {
+    this.mesh = new THREE.InstancedMesh(clippingGeometry(), new THREE.MeshStandardMaterial({ color: '#8da84c', roughness: 0.92 }), Clippings.MAX);
+    this.mesh.count = 0;
+    this.mesh.frustumCulled = false;
+    this.mesh.castShadow = false;
+    this.mesh.receiveShadow = true;
+    world.scene.add(this.mesh);
+  }
+
+  /** Discharge some cut grass to the mower's side. Direction is normalized by the caller. */
+  eject(lot: number, x: number, z: number, vx: number, vz: number, amount = 1) {
+    if (lot < 0) return;
+    for (let n = 0; n < Math.ceil(amount * Clippings.YIELD_MULTIPLIER); n++) {
+      const i = this.slot();
+      if (i < 0) return;
+      const spread = 0.1;
+      const clip: Clipping = {
+        x: x + (Math.random() - 0.5) * spread, z: z + (Math.random() - 0.5) * spread,
+        y: 0.06 + Math.random() * 0.13, vy: 1.1 + Math.random() * 1.1,
+        vx: vx + (Math.random() - 0.5) * 0.9, vz: vz + (Math.random() - 0.5) * 0.9,
+        lot, alive: true, size: 0.48 + Math.random() * 0.36, yaw: Math.random() * Math.PI * 2,
+      };
+      this.list[i] = clip;
+      this.mesh.setColorAt(i, new THREE.Color(this.palette[Math.floor(Math.random() * this.palette.length)]));
+      this.mesh.count = Math.max(this.mesh.count, i + 1);
+      this.write(i, clip);
+    }
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  /** Push a resting pile out through the mower's side-discharge path. */
+  mowerPass(x: number, z: number, yaw: number, speed: number, radius = 1.1) {
+    if (speed < 0.15) return;
+    const fx = Math.sin(yaw), fz = Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
+    for (const c of this.list) {
+      if (!c.alive || Math.hypot(c.x - x, c.z - z) > radius) continue;
+      const strength = 1 - Math.hypot(c.x - x, c.z - z) / radius;
+      c.vx = rx * (1.2 + speed * 0.16) + fx * 0.25 + (Math.random() - 0.5) * 0.45;
+      c.vz = rz * (1.2 + speed * 0.16) + fz * 0.25 + (Math.random() - 0.5) * 0.45;
+      c.vy = Math.max(c.vy, 0.45 + strength * 1.1);
+      c.y = Math.max(c.y, 0.035);
+    }
+  }
+
+  /** Blow clippings forward in a cone and clear them from the yard. */
+  blow(x: number, z: number, fx: number, fz: number, length: number, width: number) {
+    let removed = 0;
+    for (const c of this.list) {
+      if (!c.alive) continue;
+      const dx = c.x - x, dz = c.z - z;
+      const along = dx * fx + dz * fz;
+      const across = Math.abs(dx * fz - dz * fx);
+      if (along < -0.25 || along > length || across > width) continue;
+      c.alive = false;
+      removed++;
+    }
+    return removed;
+  }
+
+  /** Rake a small patch into a bag / off the lawn. */
+  rake(x: number, z: number, radius: number) {
+    let removed = 0;
+    for (const c of this.list) {
+      if (!c.alive || Math.hypot(c.x - x, c.z - z) > radius) continue;
+      c.alive = false;
+      removed++;
+    }
+    return removed;
+  }
+
+  nearest(x: number, z: number, radius: number) {
+    let best: { x: number; z: number } | null = null, distance = radius;
+    for (const c of this.list) {
+      if (!c.alive) continue;
+      const d = Math.hypot(c.x - x, c.z - z);
+      if (d < distance) { distance = d; best = { x: c.x, z: c.z }; }
+    }
+    return best;
+  }
+
+  left(lot: number) { let n = 0; for (const c of this.list) if (c.alive && c.lot === lot) n++; return n; }
+
+  clearLot(lot: number) { for (const c of this.list) if (c.alive && c.lot === lot) c.alive = false; }
+  clearAll() { for (const c of this.list) c.alive = false; }
+
+  save(): ClippingSave[] {
+    return this.list.filter((c) => c.alive).map(({ x, z, lot, size, yaw }) => ({ x, z, lot, size, yaw }));
+  }
+
+  restore(saved: ClippingSave[]) {
+    this.clearAll();
+    for (const c of saved.slice(0, Clippings.MAX)) {
+      const i = this.slot();
+      if (i < 0) break;
+      const clip: Clipping = { ...c, alive: true, y: 0.015, vy: 0, vx: 0, vz: 0 };
+      this.list[i] = clip;
+      this.mesh.setColorAt(i, new THREE.Color(this.palette[Math.floor(Math.random() * this.palette.length)]));
+      this.mesh.count = Math.max(this.mesh.count, i + 1);
+      this.write(i, clip);
+    }
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  update(dt: number) {
+    const drag = Math.exp(-3.5 * dt);
+    for (let i = 0; i < this.mesh.count; i++) {
+      const c = this.list[i];
+      if (!c?.alive) { this.mesh.setMatrixAt(i, this.matrix.makeScale(0, 0, 0)); continue; }
+      if (c.y > 0.015 || Math.abs(c.vy) > 0.02) {
+        c.x += c.vx * dt; c.z += c.vz * dt;
+        c.vx *= drag; c.vz *= drag;
+        c.vy -= 7.5 * dt; c.y += c.vy * dt;
+        if (c.y <= 0.015) {
+          c.y = 0.015;
+          c.vy = -c.vy * 0.12;
+          if (c.vy < 0.18) { c.vy = 0; c.vx *= 0.25; c.vz *= 0.25; }
+        }
+      }
+      this.write(i, c);
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  private slot() {
+    const dead = this.list.findIndex((c) => !c.alive);
+    if (dead >= 0) return dead;
+    return this.list.length < Clippings.MAX ? this.list.length : -1;
+  }
+
+  private write(i: number, c: Clipping) {
+    this.position.set(c.x, c.y, c.z);
+    this.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), c.yaw);
+    this.scale.set(c.size, c.size, c.size);
+    this.mesh.setMatrixAt(i, this.matrix.compose(this.position, this.quaternion, this.scale));
+  }
+}
+
+/** A small low pile of freshly cut blades, laid flat so many pieces read as a mound. */
+function clippingGeometry() {
+  const positions: number[] = [], colors: number[] = [], normals: number[] = [];
+  for (let blade = 0; blade < 9; blade++) {
+    const a = blade / 9 * Math.PI * 2 + Math.random() * 0.5;
+    const r = (Math.random() - 0.5) * 0.04;
+    const x = Math.cos(a), z = Math.sin(a), w = 0.005 + Math.random() * 0.004, len = 0.055 + Math.random() * 0.045;
+    const wx = -z * w, wz = x * w;
+    const bx = x * r, bz = z * r, tx = bx + x * len, tz = bz + z * len;
+    positions.push(bx - wx, 0.004, bz - wz, bx + wx, 0.004, bz + wz, tx, 0.012 + Math.random() * 0.01, tz);
+    const shade = 0.75 + Math.random() * 0.4;
+    colors.push(shade, shade, shade, shade, shade, shade, shade * 1.1, shade * 1.1, shade * 1.1);
+    normals.push(0, 1, 0, 0, 1, 0, 0, 1, 0);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  return geo;
 }
 
 /** A maple-ish leaf: five thin lobes fanned around a stem, with a warm rim so it reads at a glance. */

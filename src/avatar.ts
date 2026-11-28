@@ -17,6 +17,36 @@ export interface WalkerModel {
 
 const mat = (color: string, roughness = 0.75) => new THREE.MeshStandardMaterial({ color, roughness, metalness: 0.04 });
 
+/** Shared, forward-facing, low-poly head that matches the game's simple character style. */
+export function buildHead(skin: THREE.Material, capMat: THREE.Material) {
+  const head = new THREE.Group();
+  const dark = mat('#49352c', 0.9);
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.08, 0.14, 10), skin);
+  neck.position.y = -0.125;
+  const skull = new THREE.Mesh(new THREE.SphereGeometry(0.135, 14, 10), skin);
+  const ears = [-1, 1].map((side) => {
+    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.03, 8, 6), skin);
+    ear.position.set(side * 0.126, -0.005, -0.005);
+    ear.scale.set(0.55, 0.9, 0.65);
+    return ear;
+  });
+  const eyes: THREE.Mesh[] = [];
+  for (const x of [-0.045, 0.045]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.012, 8, 6), dark);
+    eye.position.set(x, 0.02, 0.128);
+    eyes.push(eye);
+  }
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.018, 0.04, 7), skin);
+  nose.rotation.x = Math.PI / 2;
+  nose.position.set(0, -0.015, 0.135);
+  const crown = new THREE.Mesh(new THREE.SphereGeometry(0.145, 14, 8, 0, Math.PI * 2, 0, Math.PI * 0.52), capMat);
+  crown.position.y = 0.056;
+  const brim = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.024, 0.16), capMat);
+  brim.position.set(0, 0.05, 0.105);
+  head.add(neck, skull, ...ears, ...eyes, nose, crown, brim);
+  return head;
+}
+
 /**
  * A gardener on foot: cap, shirt, dungarees and boots, with hip and shoulder pivots so the legs and
  * arms swing as they walk. Faces +Z, the same as the mower.
@@ -48,18 +78,9 @@ export function buildWalker(): WalkerModel {
   belt.position.y = 0.94;
   belt.scale.z = 0.85;
 
-  // head
-  const head = new THREE.Group();
+  // Head details are built as one reusable model so the pedestrian and mower driver match.
+  const head = buildHead(skin, capM);
   head.position.y = 1.44;
-  const skull = new THREE.Mesh(new THREE.SphereGeometry(0.135, 16, 14), skin);
-  const capTop = new THREE.Mesh(new THREE.SphereGeometry(0.145, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2), capM);
-  capTop.position.y = 0.03;
-  const brim = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.025, 0.16), capM);
-  brim.position.set(0, 0.03, 0.12);
-  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.06, 8), skin);
-  nose.rotation.x = Math.PI / 2;
-  nose.position.set(0, -0.005, 0.135);
-  head.add(skull, capTop, brim, nose);
 
   torso.add(hips, chest, vest, belt, head);
 

@@ -46,6 +46,10 @@ export class Engine {
     this.pixelRatio = Math.min(window.devicePixelRatio, this.isTouch ? 1.5 : 2);
     this.renderer.setPixelRatio(this.pixelRatio);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    // Filmic highlights and a gentler contrast curve give painted metal, glass and foliage a more
+    // natural range without changing the game's bright, friendly palette.
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.08;
     if (opts.shadows) {
       this.renderer.shadowMap.enabled = true;
       this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
