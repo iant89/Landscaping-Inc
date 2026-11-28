@@ -109,6 +109,55 @@ export class Mover {
     return hit;
   }
 
+  /**
+   * Car-like driving for vehicles: `throttle` (-1..1, + = forward) eases the forward speed
+   * toward throttle * maxSpeed, and `steer` (-1..1, + = right) turns the heading at a rate
+   * proportional to speed. The body can't strafe — steering without throttle does nothing
+   * (unless `spinRate` > 0, a zero-turn that can spin in place) — and in reverse the wheel
+   * turns the nose the other way, like a real truck. Because the inputs are heading-relative,
+   * a camera that swings behind the vehicle can't rotate the controls underneath the driver.
+   */
+  updateCar(dt: number, throttle: number, steer: number, world: CollisionWorld, speedMul = 1, spinRate = 0): Hit {
+    const o = this.o;
+    const spd = o.maxSpeed * speedMul;
+    const th = clamp(throttle, -1, 1), st = clamp(steer, -1, 1);
+    const ovx = this.vx, ovz = this.vz;
+
+    // forward speed along the current heading
+    const sy0 = Math.sin(this.yaw), cy0 = Math.cos(this.yaw);
+    let fwd = this.vx * sy0 + this.vz * cy0;
+    const k = dampK(Math.abs(th) > 0.05 ? o.accel : o.decel, dt);
+    fwd += (th * spd - fwd) * k;
+
+    // turn: yaw rate proportional to speed, so the turning radius is roughly constant and
+    // reverse steering flips the nose the other way. `turnRate` is scaled down from the
+    // omnidirectional smoothing rate to a yaw rate in rad/s. A zero-turn (`spinRate` > 0)
+    // also spins in place when the throttle is released, fading out as you drive.
+    if (dt > 0 && spd > 0.01) {
+      const spin = spinRate * (1 - Math.min(1, Math.abs(th)));
+      this.yaw += -st * (o.turnRate * 0.28 * (fwd / spd) + spin) * dt;
+    }
+
+    // velocity is always along the (new) heading: no sideways slide
+    const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
+    this.vx = sy * fwd;
+    this.vz = cy * fwd;
+
+    // lean from acceleration, in the body's own frame (same as update())
+    if (dt > 0) {
+      const ax = (this.vx - ovx) / dt, az = (this.vz - ovz) / dt;
+      const af = ax * sy + az * cy, as = ax * cy - az * sy;
+      const lk = Math.min(1, dt * o.leanRate);
+      this.leanX += (clamp(-af * o.lean, -o.leanMax, o.leanMax) - this.leanX) * lk;
+      this.leanZ += (clamp(as * o.lean, -o.leanMax, o.leanMax) - this.leanZ) * lk;
+    }
+
+    return this.integrate(dt, world);
+  }
+
+  /** Forward speed along the heading (+ forward, - reversing). */
+  get forwardSpeed() { return this.vx * Math.sin(this.yaw) + this.vz * Math.cos(this.yaw); }
+
   /** Move by the current velocity in small substeps, resolving collisions after each. */
   integrate(dt: number, world: CollisionWorld): Hit {
     const steps = Math.max(1, Math.ceil((this.speed * dt) / this.o.substep));

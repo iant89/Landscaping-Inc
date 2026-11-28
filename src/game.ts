@@ -304,7 +304,7 @@ export class Game {
     this.fuelArrow.renderOrder = 40;
     this.world.scene.add(this.fuelArrow);
     this.parkRigAt(RIG_HOME.x, RIG_HOME.z, RIG_HOME.yaw);
-    this.cam = new FollowCamera(this.engine.camera, { offset: new THREE.Vector3(0, 4.6, 8.2), lookAhead: 2.5, boostFov: 6 }, this.engine.syncProjection);
+    this.cam = new FollowCamera(this.engine.camera, { offset: new THREE.Vector3(0, 4.6, 8.2), lookAhead: 2.5, boostFov: 6, headingRate: 3.5, headingMinSpeed: 0.8 }, this.engine.syncProjection);
     this.controls = new Input({ keymap: { ...DEFAULT_KEYMAP, KeyF: 'tool' }, capture: () => this.phase === 'play', onKey: this.onKey });
     new TouchStick(container, this.controls);
     this.setupOrbit();
@@ -625,6 +625,8 @@ export class Game {
 
   /** Middle-mouse drag orbits the camera around the player; drag up/down tilts a little. */
   private orbitDrag: { x: number; y: number } | null = null;
+  /** Seconds the vehicles' auto-follow camera stays out of the way after a manual orbit. */
+  private camHoldT = 0;
 
   private setupOrbit() {
     const el = this.engine.renderer.domElement;
@@ -640,6 +642,8 @@ export class Game {
     el.addEventListener('pointermove', (e) => {
       const d = this.orbitDrag;
       if (!d) return;
+      // the player is looking around on purpose: keep the vehicle's auto-follow off for a bit
+      this.camHoldT = 1.8;
       if (Math.abs(e.clientX - d.x) > 0) this.cam.turn(-(e.clientX - d.x) * 0.006);
       // tilt: raise or lower the camera a touch, clamped so you never end up under the ground
       const tilt = -(e.clientY - d.y) * 0.02;
@@ -1069,6 +1073,9 @@ export class Game {
   /**
    * Keys are screen-relative: "up" always means away from the camera. The stick is turned by the
    * camera's yaw each frame, so the chase view and a hand-orbited view both steer true.
+   * Used on foot, which glides in any direction. Vehicles do NOT use this: their cameras
+   * swing behind them while driving forward, and a camera-relative stick would have its
+   * meaning rotated underneath the driver mid-turn (the "controls go crazy" spiral).
    */
   private stick() {
     const raw = this.controls.read();
@@ -1081,13 +1088,28 @@ export class Game {
     return { ...raw, x: -raw.x * c - raw.z * s, z: raw.x * s - raw.z * c };
   }
 
+  /**
+   * Vehicle controls: heading-relative throttle + steer, independent of the camera angle.
+   * W / up is throttle forward, S / down is reverse, A / D steer left / right. Because the
+   * camera can freely swing behind the vehicle without touching these, auto-follow can't
+   * mess the controls up. The touch stick maps the same way (push up to drive, left/right to steer).
+   */
+  private driveInput() {
+    const raw = this.controls.read();
+    if (raw.m < 0.02) return { ...raw, throttle: 0, steer: 0 };
+    return { ...raw, throttle: clamp(-raw.z, -1, 1), steer: clamp(raw.x, -1, 1) };
+  }
+
   private play(dt: number, t: number) {
     this.hour += dt / SEC_PER_HOUR;
     if (this.hour >= DAY_END) { this.hour = DAY_END; this.endDay(); return; }
 
-    const inp = this.stick();
     const m = this.active;
-    this.boost = this.mounted === 'mower' && inp.boost && inp.m > 0.1;
+    // vehicles drive on heading-relative throttle + steer; on foot glides camera-relative.
+    // See driveInput() for why vehicles can't use the camera stick.
+    const inp = this.mounted === null ? this.stick() : null;
+    const drv = this.mounted !== null ? this.driveInput() : null;
+    this.boost = this.mounted === 'mower' && !!drv && drv.boost && drv.m > 0.1;
     // rain makes the grass slick: slower to grip, slower to stop (better tyres help)
     const grip = this.mounted === 'mower' && this.today === 'rain' ? 0.42 + 0.17 * this.up.tires : this.mounted === 'rig' && this.today === 'rain' ? 0.6 + 0.13 * this.up.tires : 1;
     if (this.mounted === 'mower') {
@@ -1103,7 +1125,10 @@ export class Game {
     }
     // the mower is out of fuel; the rig is out of fuel with an empty can
     const dry = this.mounted !== null && this.fuel <= 0;
-    const hit = m.update(dt, dry ? 0 : inp.x, dry ? 0 : inp.z, dry ? 0 : inp.m, this.world, this.boost ? 1.35 : 1);
+    // the mower is a zero-turn (it spins in place with no throttle); the truck is not
+    const hit = this.mounted !== null && drv
+      ? m.updateCar(dt, dry ? 0 : drv.throttle, dry ? 0 : drv.steer, this.world, this.boost ? 1.35 : 1, this.mounted === 'mower' ? 2.4 : 0)
+      : m.update(dt, dry || !inp ? 0 : inp.x, dry || !inp ? 0 : inp.z, dry || !inp ? 0 : inp.m, this.world, this.boost ? 1.35 : 1);
     this.bumpCd -= dt;
     if (hit.impact > 2.4 && this.bumpCd <= 0) this.bump(hit.impact, hit.nx, hit.nz);
     const maxSp = this.mounted === 'rig' ? RIG_SPEED : this.mounted === 'mower' ? this.speedMax : this.feet.o.maxSpeed;
@@ -1150,10 +1175,17 @@ export class Game {
     else if (this.mounted === 'rig') this.sfx.drone(0.3 + frac * 0.35, frac * 1.1);
     else this.sfx.drone(0, 0);
 
-    // Third-person camera. The player owns the view angle: it only turns when they drag it or press
-    // R. Auto-following the heading is deliberately NOT done — with camera-relative keys a view that
-    // chases you rotates the controls underneath you and a held turn spirals (the "controls go
-    // crazy" bug). You always see out of the back of the camera, so it reads as third person.
+    // Third-person camera. On foot the player owns the view angle: it only turns when they
+    // drag it or press R, because walking keys are camera-relative and a chasing view would
+    // rotate the controls underneath them (the old "controls go crazy" spiral). Vehicles
+    // drive on heading-relative throttle + steer, so the camera can safely swing behind
+    // them. It does so only while driving forward — reversing, idling, spinning in place
+    // and parking leave the view where the player put it, and a manual orbit pauses the
+    // follow for a moment so you can look at the trailer, the deck or a house.
+    this.camHoldT = Math.max(0, this.camHoldT - dt);
+    if (this.mounted !== null && this.orbitDrag === null && this.camHoldT <= 0) {
+      this.cam.followHeading(dt, m.yaw, m.forwardSpeed);
+    }
     this.cam.update(dt, m.x, m.z, m.vx, m.vz, this.boost);
     // a bigger vehicle wants a wider view; this only changes distance and height, never the angle
     this.cam.setPull(this.camPull(), this.orbitDrag === null ? dt : 0);
