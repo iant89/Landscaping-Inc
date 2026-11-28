@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { DEFAULT_KEYMAP, Engine, FollowCamera, Input, Mover, Particles, Popups, Squash, TouchStick, clamp, lerpAngle, poseBody } from '../engine/src';
+import { DEFAULT_KEYMAP, DistanceCuller, Engine, FollowCamera, Input, Mover, Particles, Popups, Squash, TouchStick, clamp, lerpAngle, poseBody } from '../engine/src';
 import {
   BURN, CAN_FRACTION, CAN_POUR_TIME, CELL, CROSS_MID, DAY_END, DAY_START, FUEL_PRICE, GH, GW, HELPER_COST, HELPER_NAMES,
   HELPER_WAGE, K_BED, K_LAWN, LOAD_TIME, MAX_STRIKES, MAX_X, MAX_Z, MIN_X, MIN_Z, PUMP, PUMP_R, RAMP_ANGLE, RAMP_MOUTH_R, RIG_RANGE, RIG_SPEED,
@@ -215,6 +215,8 @@ export class Game {
   private puffT = 0;
   private cloudT = 0;
   private clouds: THREE.Sprite[] = [];
+  /** Hides static scenery and lawn chunks once they're past the fog, where they can't be seen. */
+  private culler!: DistanceCuller;
   private canHinted = false;
   gnomes: Gnome[] = [];
   crew: Crew[] = [];
@@ -285,6 +287,10 @@ export class Game {
     this.flowers = new Flowers(this.world);
     this.leaves = new Leaves(this.world);
     this.clippings = new Clippings(this.world);
+    // Everything in the scene so far is static world scenery plus the per-lot lawn meshes. Anything
+    // whose nearest point is past the fog's far end is drawn as pure fog colour, so skip it.
+    this.culler = new DistanceCuller((this.world.scene.fog as THREE.Fog).far);
+    this.culler.addTree(this.world.scene, (o) => o === this.world.sky);
     this.clips = this.engine.addParticles(1200, false);
     this.sparks = this.engine.addParticles(700, true);
     this.smoke = this.engine.addParticles(400, false);
@@ -1104,6 +1110,7 @@ export class Game {
     this.updateFades(dt);
     this.updateLighting();
     this.updateSky(dt);
+    this.culler.update(dt, this.engine.camera);
     this.leaves.update(dt, t, this.wx.wind, this.onLeafLand);
     this.clippings.update(dt);
     if (this.phase === 'play') this.refillCanAtPump(dt);

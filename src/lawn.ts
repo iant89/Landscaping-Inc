@@ -20,18 +20,39 @@ function cutTurfTexture() {
 
 export type CutKind = 'lawn' | 'edge' | null;
 
+/** One lot's share of the lawn: its own instanced meshes so the renderer can skip lots out of view. */
+interface GrassChunk {
+  tufts: THREE.InstancedMesh;
+  turf: THREE.InstancedMesh;
+  surface: THREE.InstancedMesh;
+  /** First tuft index (into the shared per-tuft arrays) and first turf slot owned by this chunk. */
+  start: number;
+  sStart: number;
+  hAttr: THREE.InstancedBufferAttribute;
+  bendAttr: THREE.InstancedBufferAttribute;
+}
+
 /**
  * Lawn cells hold instanced grass tufts; so do "edge" cells (paving along the lawn's border, where
  * grass creeps over). Cutting a lawn cell hides its blades to reveal a smooth, subtly striped turf
  * layer; cutting an edge cell clears the creep entirely. Tuft heights live in a per-instance
  * attribute, scaled and swayed by a shader patch.
+ *
+ * Each lot gets its own set of instanced meshes with a bounding sphere around that lot, so the
+ * renderer's frustum culling (and the distance culler) can drop lots that can't be seen. Per-tuft
+ * state stays in shared arrays; each chunk's GPU attributes are views onto its slice of them.
  */
 export class Grass {
-  mesh: THREE.InstancedMesh;
-  /** Continuous turf texture under every lawn blade; cut cells lift this layer slightly. */
-  private cutTurf: THREE.InstancedMesh;
-  /** Fine short-grass surface shown over cells after mowing. */
-  private cutSurface: THREE.InstancedMesh;
+  /** Every mesh the lawn draws (three per lot), for culling and debugging. */
+  readonly meshes: THREE.InstancedMesh[] = [];
+  private chunks: GrassChunk[] = [];
+  /** Chunk index for each tuft and each turf slot. */
+  private chunkOfTuft: Uint16Array;
+  private chunkOfSlot: Uint16Array;
+  /** Chunk index for each lot id (-1 if the lot has no lawn). */
+  private chunkOfLot: Int32Array;
+  private hDirty = new Set<GrassChunk>();
+  private bendDirty = new Set<GrassChunk>();
   private surfaceSlot: Int32Array;
   private surfaceMatrix = new THREE.Matrix4();
   private surfaceColor = new THREE.Color();
@@ -39,10 +60,8 @@ export class Grass {
   private slot: Int32Array;
   private h: Float32Array;
   private target: Float32Array;
-  private hAttr: THREE.InstancedBufferAttribute;
   private bendData: Float32Array;
   private bendTarget: Float32Array;
-  private bendAttr: THREE.InstancedBufferAttribute;
   private instanceYaw: Float32Array;
   private moving = new Set<number>();
   private bending = new Set<number>();
@@ -51,9 +70,8 @@ export class Grass {
   readonly wind = { value: 1 };
 
   constructor(private world: World, private perCell = 2) {
-    const lawn = world.lots.flatMap((l) => l.lawnCells);
-    const edges = world.lots.flatMap((l) => l.edgeCells);
-    const n = (lawn.length + edges.length) * perCell;
+    const lawnCount = world.lots.reduce((a, l) => a + l.lawnCells.length, 0);
+    const n = world.lots.reduce((a, l) => a + l.lawnCells.length + l.edgeCells.length, 0) * perCell;
     const mat = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.85, metalness: 0 });
     mat.onBeforeCompile = (sh) => {
       sh.uniforms.uTime = this.time;
@@ -72,21 +90,16 @@ export class Grass {
         .replace('#include <common>', '#include <common>\nvarying float vGrassHeight;')
         .replace('#include <color_fragment>', 'if (vGrassHeight < 0.02) discard;\n#include <color_fragment>');
     };
-    const geo = tuftGeometry();
+    const tuftBase = tuftGeometry();
     this.h = new Float32Array(n).fill(1);
     this.target = new Float32Array(n).fill(1);
-    this.hAttr = new THREE.InstancedBufferAttribute(this.h, 1);
-    this.hAttr.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute('aH', this.hAttr);
     this.bendData = new Float32Array(n * 3);
     this.bendTarget = new Float32Array(n);
     this.instanceYaw = new Float32Array(n);
-    this.bendAttr = new THREE.InstancedBufferAttribute(this.bendData, 3);
-    this.bendAttr.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute('aBend', this.bendAttr);
-    this.mesh = new THREE.InstancedMesh(geo, mat, n);
-    this.mesh.receiveShadow = true;
-    this.mesh.frustumCulled = false;
+    this.chunkOfTuft = new Uint16Array(n);
+    this.chunkOfSlot = new Uint16Array(lawnCount);
+    this.chunkOfLot = new Int32Array(world.lots.reduce((a, l) => Math.max(a, l.id + 1), 0)).fill(-1);
+
     const turfGeo = new THREE.PlaneGeometry(CELL, CELL);
     turfGeo.rotateX(-Math.PI / 2);
     const turfMaterial = new THREE.MeshStandardMaterial({ map: cutTurfTexture(), color: '#ffffff', roughness: 1, metalness: 0 });
@@ -98,10 +111,6 @@ export class Grass {
           vMapUv = (modelMatrix * instanceMatrix * vec4(position, 1.0)).xz * 0.55;
         #endif`);
     };
-    this.cutTurf = new THREE.InstancedMesh(turfGeo, turfMaterial, lawn.length);
-    this.cutTurf.receiveShadow = true;
-    this.cutTurf.frustumCulled = false;
-    this.cutTurf.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     const shortMaterial = new THREE.MeshStandardMaterial({ map: grassTexture(), color: '#ffffff', roughness: 1, metalness: 0 });
     shortMaterial.onBeforeCompile = (shader) => {
       shader.vertexShader = shader.vertexShader.replace('#include <uv_vertex>', `#include <uv_vertex>
@@ -109,52 +118,89 @@ export class Grass {
           vMapUv = (modelMatrix * instanceMatrix * vec4(position, 1.0)).xz * 0.75;
         #endif`);
     };
-    this.cutSurface = new THREE.InstancedMesh(turfGeo, shortMaterial, lawn.length);
-    this.cutSurface.receiveShadow = true;
-    this.cutSurface.frustumCulled = false;
-    this.cutSurface.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
     this.surfaceSlot = new Int32Array(world.kind.length).fill(-1);
-    const initialTurf = new THREE.Color('#ffffff'), baseTurfMatrix = new THREE.Matrix4();
-    const hiddenSurface = this.hiddenSurfaceMatrix;
-    lawn.forEach((cell, i) => {
-      this.surfaceSlot[cell] = i;
-      this.cutTurf.setMatrixAt(i, baseTurfMatrix.makeTranslation(cellX(cell), 0.008, cellZ(cell)));
-      this.cutTurf.setColorAt(i, initialTurf);
-      this.cutSurface.setMatrixAt(i, hiddenSurface);
-      this.cutSurface.setColorAt(i, initialTurf);
-    });
-    this.cutTurf.instanceMatrix.needsUpdate = true;
-    if (this.cutTurf.instanceColor) this.cutTurf.instanceColor.needsUpdate = true;
-    this.cutSurface.instanceMatrix.needsUpdate = true;
-    if (this.cutSurface.instanceColor) this.cutSurface.instanceColor.needsUpdate = true;
     this.slot = new Int32Array(world.kind.length).fill(-1);
     this.cut = new Uint8Array(world.kind.length);
-    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
+    const white = new THREE.Color('#ffffff'), m = new THREE.Matrix4(), q = new THREE.Quaternion();
+    const p = new THREE.Vector3(), s = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
     const col = new THREE.Color();
-    let k = 0;
-    const place = (c: number, edge: boolean) => {
-      this.slot[c] = k;
-      const tint = grassTintForCell(c, world.kind, world.owner);
-      const hsl = tint.getHSL({ h: 0, s: 0, l: 0 });
-      for (let t = 0; t < perCell; t++, k++) {
-        p.set(cellX(c) + (Math.random() - 0.5) * CELL * 0.8, 0, cellZ(c) + (Math.random() - 0.5) * CELL * 0.8);
-        const yaw = Math.random() * Math.PI * 2;
-        q.setFromAxisAngle(up, yaw);
-        this.instanceYaw[k] = yaw;
-        const sc = (edge ? 0.6 : 0.85) + Math.random() * 0.4;
-        s.set(sc, sc * (0.85 + Math.random() * 0.35), sc);
-        this.mesh.setMatrixAt(k, m.compose(p, q, s));
-        col.setHSL(
-          hsl.h + (Math.random() - 0.5) * 0.012,
-          Math.max(0.38, Math.min(0.72, hsl.s + (Math.random() - 0.5) * 0.1)),
-          Math.max(0.22, Math.min(0.48, hsl.l + (Math.random() - 0.5) * 0.08)),
-        );
-        this.mesh.setColorAt(k, col);
+    let k = 0, si = 0;
+    for (const lot of world.lots) {
+      const cells = lot.lawnCells.length + lot.edgeCells.length;
+      if (!cells) continue;
+      const ci = this.chunks.length, start = k, sStart = si, count = cells * perCell;
+      // the tuft shape is shared; only the per-instance attributes differ between chunks
+      const geo = new THREE.BufferGeometry();
+      for (const name of Object.keys(tuftBase.attributes)) geo.setAttribute(name, tuftBase.attributes[name]);
+      const hAttr = new THREE.InstancedBufferAttribute(this.h.subarray(start, start + count), 1);
+      hAttr.setUsage(THREE.DynamicDrawUsage);
+      geo.setAttribute('aH', hAttr);
+      const bendAttr = new THREE.InstancedBufferAttribute(this.bendData.subarray(start * 3, (start + count) * 3), 3);
+      bendAttr.setUsage(THREE.DynamicDrawUsage);
+      geo.setAttribute('aBend', bendAttr);
+      const tufts = new THREE.InstancedMesh(geo, mat, count);
+      tufts.receiveShadow = true;
+      const turf = new THREE.InstancedMesh(turfGeo, turfMaterial, Math.max(1, lot.lawnCells.length));
+      turf.receiveShadow = true;
+      turf.count = lot.lawnCells.length;
+      turf.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      const surface = new THREE.InstancedMesh(turfGeo, shortMaterial, Math.max(1, lot.lawnCells.length));
+      surface.receiveShadow = true;
+      surface.count = lot.lawnCells.length;
+      surface.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+      const place = (c: number, edge: boolean) => {
+        this.slot[c] = k;
+        const tint = grassTintForCell(c, world.kind, world.owner);
+        const hsl = tint.getHSL({ h: 0, s: 0, l: 0 });
+        for (let t = 0; t < perCell; t++, k++) {
+          this.chunkOfTuft[k] = ci;
+          p.set(cellX(c) + (Math.random() - 0.5) * CELL * 0.8, 0, cellZ(c) + (Math.random() - 0.5) * CELL * 0.8);
+          const yaw = Math.random() * Math.PI * 2;
+          q.setFromAxisAngle(up, yaw);
+          this.instanceYaw[k] = yaw;
+          const sc = (edge ? 0.6 : 0.85) + Math.random() * 0.4;
+          s.set(sc, sc * (0.85 + Math.random() * 0.35), sc);
+          tufts.setMatrixAt(k - start, m.compose(p, q, s));
+          col.setHSL(
+            hsl.h + (Math.random() - 0.5) * 0.012,
+            Math.max(0.38, Math.min(0.72, hsl.s + (Math.random() - 0.5) * 0.1)),
+            Math.max(0.22, Math.min(0.48, hsl.l + (Math.random() - 0.5) * 0.08)),
+          );
+          tufts.setColorAt(k - start, col);
+        }
+      };
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      for (const c of lot.lawnCells) {
+        this.surfaceSlot[c] = si;
+        this.chunkOfSlot[si] = ci;
+        turf.setMatrixAt(si - sStart, m.makeTranslation(cellX(c), 0.008, cellZ(c)));
+        turf.setColorAt(si - sStart, white);
+        surface.setMatrixAt(si - sStart, this.hiddenSurfaceMatrix);
+        surface.setColorAt(si - sStart, white);
+        si++;
+        place(c, false);
       }
-    };
-    for (const c of lawn) place(c, false);
-    for (const c of edges) place(c, true);
-    world.scene.add(this.mesh, this.cutTurf, this.cutSurface);
+      for (const c of lot.edgeCells) place(c, true);
+      for (const c of [...lot.lawnCells, ...lot.edgeCells]) {
+        minX = Math.min(minX, cellX(c)); maxX = Math.max(maxX, cellX(c));
+        minZ = Math.min(minZ, cellZ(c)); maxZ = Math.max(maxZ, cellZ(c));
+      }
+      // Fixed bounds around the whole lot (plus room for blade height, sway and bending), so cutting
+      // or hiding instances never needs the sphere recomputed.
+      const sphere = new THREE.Sphere(
+        new THREE.Vector3((minX + maxX) / 2, 0.4, (minZ + maxZ) / 2),
+        Math.hypot(maxX - minX + CELL, maxZ - minZ + CELL) / 2 + 1.2,
+      );
+      for (const mesh of [tufts, turf, surface]) {
+        mesh.boundingSphere = sphere.clone();
+        this.meshes.push(mesh);
+        world.scene.add(mesh);
+      }
+      this.chunkOfLot[lot.id] = ci;
+      this.chunks.push({ tufts, turf, surface, start, sStart, hAttr, bendAttr });
+    }
   }
 
   isCut(cell: number) { return this.cut[cell] === 1; }
@@ -168,26 +214,24 @@ export class Grass {
     return total / this.perCell;
   }
 
-  private showCutTurf(cell: number, light: boolean) {
+  private setSurface(cell: number, matrix: THREE.Matrix4, color: string) {
     const i = this.surfaceSlot[cell];
     if (i < 0) return;
-    this.cutSurface.setMatrixAt(i, this.surfaceMatrix.makeTranslation(cellX(cell), 0.02, cellZ(cell)));
-    this.cutSurface.setColorAt(i, this.surfaceColor.set(light ? '#ffffff' : '#d9e8c8'));
-    this.cutSurface.instanceMatrix.addUpdateRange(i * 16, 16);
-    this.cutSurface.instanceColor?.addUpdateRange(i * 3, 3);
-    this.cutSurface.instanceMatrix.needsUpdate = true;
-    if (this.cutSurface.instanceColor) this.cutSurface.instanceColor.needsUpdate = true;
+    const ch = this.chunks[this.chunkOfSlot[i]], j = i - ch.sStart, mesh = ch.surface;
+    mesh.setMatrixAt(j, matrix);
+    mesh.setColorAt(j, this.surfaceColor.set(color));
+    mesh.instanceMatrix.addUpdateRange(j * 16, 16);
+    mesh.instanceColor?.addUpdateRange(j * 3, 3);
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }
+
+  private showCutTurf(cell: number, light: boolean) {
+    this.setSurface(cell, this.surfaceMatrix.makeTranslation(cellX(cell), 0.02, cellZ(cell)), light ? '#ffffff' : '#d9e8c8');
   }
 
   private hideCutTurf(cell: number) {
-    const i = this.surfaceSlot[cell];
-    if (i < 0) return;
-    this.cutSurface.setMatrixAt(i, this.hiddenSurfaceMatrix);
-    this.cutSurface.setColorAt(i, this.surfaceColor.set('#ffffff'));
-    this.cutSurface.instanceMatrix.addUpdateRange(i * 16, 16);
-    this.cutSurface.instanceColor?.addUpdateRange(i * 3, 3);
-    this.cutSurface.instanceMatrix.needsUpdate = true;
-    if (this.cutSurface.instanceColor) this.cutSurface.instanceColor.needsUpdate = true;
+    this.setSurface(cell, this.hiddenSurfaceMatrix, '#ffffff');
   }
 
   /** Cut one lawn or edge cell. `light` picks the stripe shade. Returns what was cut, or null. */
@@ -243,11 +287,12 @@ export class Grass {
           this.bendData[i + 1] = si * dx + co * dz;
           this.bendTarget[k] = Math.max(this.bendTarget[k], amount);
           this.bending.add(k);
+          this.bendDirty.add(this.chunks[this.chunkOfTuft[k]]);
         }
         changed = true;
       }
     }
-    if (changed) this.bendAttr.needsUpdate = true;
+    if (changed) this.flushBend();
   }
 
   /**
@@ -263,7 +308,8 @@ export class Grass {
       this.setCell(c, hLawn);
     }
     for (const c of lot.edgeCells) { this.cut[c] = 0; this.setCell(c, hEdge); }
-    this.hAttr.needsUpdate = true;
+    const ci = this.chunkOfLot[lot.id];
+    if (ci >= 0) this.chunks[ci].hAttr.needsUpdate = true;
   }
 
   private setCell(c: number, h: number) {
@@ -280,8 +326,10 @@ export class Grass {
       for (const i of this.moving) {
         this.h[i] += (this.target[i] - this.h[i]) * k;
         if (Math.abs(this.h[i] - this.target[i]) < 0.01) { this.h[i] = this.target[i]; this.moving.delete(i); }
+        this.hDirty.add(this.chunks[this.chunkOfTuft[i]]);
       }
-      this.hAttr.needsUpdate = true;
+      for (const ch of this.hDirty) ch.hAttr.needsUpdate = true;
+      this.hDirty.clear();
     }
     if (this.bending.size) {
       const follow = Math.min(1, dt * 12), release = Math.exp(-dt * 1.8);
@@ -293,9 +341,15 @@ export class Grass {
           this.bendTarget[i] = this.bendData[j] = 0;
           this.bending.delete(i);
         }
+        this.bendDirty.add(this.chunks[this.chunkOfTuft[i]]);
       }
-      this.bendAttr.needsUpdate = true;
+      this.flushBend();
     }
+  }
+
+  private flushBend() {
+    for (const ch of this.bendDirty) ch.bendAttr.needsUpdate = true;
+    this.bendDirty.clear();
   }
 
   /** Push painted stripes to the GPU, one street band at a time (throttled by the caller). */
