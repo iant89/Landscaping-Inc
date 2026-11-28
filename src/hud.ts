@@ -82,6 +82,7 @@ export class Hud {
   private jobs: HTMLDivElement;
   private toasts: HTMLDivElement;
   private tutorialEl: HTMLDivElement | null = null;
+  private promptEl: HTMLDivElement;
   private overlay: HTMLDivElement;
   private dialogKeys: DialogOption[] = [];
 
@@ -111,9 +112,10 @@ export class Hud {
     cal.onclick = onSchedule;
     btns.append(pause, cal);
     tr.append(btns, this.minimap);
+    this.promptEl = h('div', 'action-prompt');
     this.toasts = h('div', 'toasts');
     this.overlay = h('div', 'overlay hidden');
-    this.root.append(tl, this.jobs, tr, this.toasts, this.overlay);
+    this.root.append(tl, this.jobs, tr, this.promptEl, this.toasts, this.overlay);
     if (isTouch) {
       const b = h('button', 'boost-btn', '⚡');
       const on = (v: boolean) => (e: Event) => { e.preventDefault(); e.stopPropagation(); b.classList.toggle('on', v); onBoost(v); };
@@ -126,6 +128,13 @@ export class Hud {
   }
 
   setPlaying(on: boolean) { this.root.classList.toggle('playing', on); }
+
+  /** The "you can do something here" line: F to run a tool, T at the trailer, L at the ramps... */
+  prompt(text: string | null, tone: 'info' | 'ok' | 'warn' = 'info') {
+    if (!text) { this.promptEl.className = 'action-prompt'; this.promptEl.innerHTML = ''; return; }
+    this.promptEl.className = `action-prompt on ${tone}`;
+    this.promptEl.innerHTML = text;
+  }
 
   update(d: HudData) {
     this.stats.innerHTML =
@@ -228,7 +237,7 @@ export class Hud {
         <li>Rain makes grass shoot up; wind brings leaves. Watch out for Green Giant Lawns.</li>
         <li>Hire crew to mow your regulars, and win more streets as your reputation grows</li>
         <li><b class="key">E</b> hop off and walk (a parked mower barely drinks fuel) · <b class="key">B</b> blades off · <b class="key">G</b> pour the spare can</li>
-        <li>Load the mower on the trailer and drive the pickup to a far street — <b class="key">L</b> winches it on · <b class="key">T</b> swaps gear at the trailer</li>
+        <li>Back the trailer up and <b class="key">drive the mower up the ramps</b> to take it to another street; <b class="key">T</b> swaps hand tools at the trailer</li>
         <li>Rung down? Knock again and <b>haggle</b> — cheaper rate, or drop a service they don't need</li>
       </ul>
       <div class="controls">WASD / arrows to drive (relative to the camera) · Shift full throttle · E mount/dismount · B blades · F use a tool · L load the mower · T trailer · G spare can · middle-drag to orbit, R to snap behind · C schedule · Esc pause · M mute</div>`);
@@ -251,7 +260,7 @@ export class Hud {
       ['E', 'Climb into the nearest vehicle / hop out'],
       ['B', 'Blades on or off (only on the mower)'],
       ['F', 'Hold to run the tool in your hands'],
-      ['L', 'Winch the mower on, or roll it off the trailer'],
+      ['L', 'Ramps down / winch the mower on (or drive it up yourself)'],
       ['T', 'Trailer menu: swap tools'],
       ['G', 'Pour the spare fuel can'],
       ['Middle-drag', 'Orbit the camera (Shift+drag also works). It holds still while you drive and settles behind you when you stop.'],

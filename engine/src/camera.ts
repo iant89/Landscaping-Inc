@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { dampK, lerpAngle } from './math';
+import { dampK } from './math';
 
 export interface FollowCameraOptions {
   /** Camera offset from the focus point (above and behind). */
@@ -42,12 +42,12 @@ export class FollowCamera {
   focus = new THREE.Vector3();
   trauma = 0;
   /**
-   * The yaw the camera is actually at (already eased). The view only turns when the game or the
-   * player turns it, so the direction "up" on the keys never drifts underneath you.
+   * The yaw the camera is actually at. The player owns it outright (drag / snap), so the direction
+   * "up" on the keys never drifts underneath them. Nothing auto-rotates the view any more.
    */
   angle = 0;
-  /** Where `angle` is easing toward. Set it and call update(); the camera does the smoothing. */
-  autoTarget: number | null = null;
+  /** Height multiplier: the game raises the view a little for a big vehicle. Eased by setPull(). */
+  pull = 1;
   /** Current FOV (eased between the normal and boost values). */
   private fovNow: number;
 
@@ -63,28 +63,33 @@ export class FollowCamera {
 
   /** Turn the view to `target` with no glide at all (after a teleport, or when the player asks). */
   snapAngle(target: number) {
-    this.autoTarget = null;
     this.angle = target;
     this.camera.position.copy(this.positionFor(this.focus));
     this.lookAtFocus();
+  }
+
+  /** Ease the camera's height multiplier (a bigger subject wants a wider, higher view). */
+  setPull(target: number, dt: number) {
+    this.pull += (target - this.pull) * (dt <= 0 ? 1 : dampK(3.5, dt));
   }
 
   /** Where the camera sits for a given focus point (accounts for portrait aspect). */
   positionFor(focus: THREE.Vector3, out = new THREE.Vector3()) {
     const a = this.camera.aspect;
     const k = a < 1 ? 1 + (1 - a) * this.o.portraitPullback : 1;
-    // swing the offset around the focus by the settled camera angle
+    // third person: the camera sits `offset.z` BEHIND the focus (opposite its facing) and
+    // `offset.y` up. angle = the facing the view looks along, so behind = -sin/-cos(angle).
     const c = Math.cos(this.angle), s = Math.sin(this.angle);
-    const ox = this.o.offset.x * c + this.o.offset.z * s;
-    const oz = -this.o.offset.x * s + this.o.offset.z * c;
-    return out.set(focus.x + ox * k, focus.y + this.o.offset.y * k, focus.z + oz * k);
+    const back = this.o.offset.z * this.pull;
+    return out.set(
+      focus.x - s * back * k,
+      focus.y + this.o.offset.y * this.pull * k,
+      focus.z - c * back * k,
+    );
   }
 
-  /** Turn the camera by hand (radians). Cancels any ease toward a target. */
-  turn(by: number) {
-    this.autoTarget = null;
-    this.angle += by;
-  }
+  /** Turn the camera by hand (radians). */
+  turn(by: number) { this.angle += by; }
 
   /**
    * Jump straight to the target with no glide (after teleports, level loads, cutscenes). A teleport
@@ -92,7 +97,7 @@ export class FollowCamera {
    */
   snap(x: number, z: number, yaw?: number) {
     this.focus.set(x, 0, z);
-    if (yaw !== undefined) { this.autoTarget = null; this.angle = yaw; }
+    if (yaw !== undefined) { this.angle = yaw; }
     this.camera.position.copy(this.positionFor(this.focus));
     this.lookAtFocus();
   }
@@ -101,10 +106,6 @@ export class FollowCamera {
   get yaw() { return this.angle; }
 
   update(dt: number, x: number, z: number, vx = 0, vz = 0, boost = false) {
-    if (this.autoTarget !== null) {
-      this.angle = lerpAngle(this.angle, this.autoTarget, dampK(1.7, dt));
-      if (Math.abs(this.autoTarget - this.angle) < 0.002) this.autoTarget = null;
-    }
     this.track(dt, x, z, vx, vz, boost);
     this.shake(dt);
   }
@@ -129,9 +130,14 @@ export class FollowCamera {
 
   /** Point the camera at the current focus (after moving it yourself). */
   lookAtFocus() {
-    // look a little past the focus, in whatever direction the view now faces
+    // look past the focus along the view direction, and at chest height rather than the floor so
+    // the subject sits comfortably in frame
     const a = this.angle;
-    this.camera.lookAt(this.focus.x - Math.sin(a) * this.o.lookAhead, 0, this.focus.z - Math.cos(a) * this.o.lookAhead);
+    this.camera.lookAt(
+      this.focus.x + Math.sin(a) * this.o.lookAhead,
+      1.0,
+      this.focus.z + Math.cos(a) * this.o.lookAhead,
+    );
   }
 
 

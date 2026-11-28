@@ -49,31 +49,57 @@ export function buildTool(id: ToolId): ToolModel {
   const accent = shell('#ffd23a', 0.5, 0.1);
 
   if (id === 'weedeater') {
-    // a straight-shaft string trimmer: motor, loop handle, long shaft, guard and cutting head
-    const motor = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.14, 0.2), orange);
-    motor.position.set(0, 0.1, -0.06);
-    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.06, 10), grey);
-    cap.position.set(0, 0.19, -0.06);
-    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.95, 8), steel());
-    shaft.rotation.x = Math.PI / 2 - 0.42;
-    shaft.position.set(0, -0.13, 0.36);
-    const handle = new THREE.Mesh(new THREE.TorusGeometry(0.075, 0.018, 6, 14), shell('#2f2f33', 0.8));
-    handle.position.set(0, 0.02, 0.16);
-    handle.rotation.x = 1.1;
-    const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.16, 8), rubber());
+    // A straight-shaft string trimmer, laid out along ONE axis so the pieces actually meet: the
+    // shaft runs forward and steeply down from the grip, with the engine behind the grip and the
+    // cutting head at the far end. `TILT` is measured from straight-ahead, positive = downhill.
+    const TILT = 0.92;
+    const dir = new THREE.Vector3(0, -Math.sin(TILT), Math.cos(TILT));
+    /** A point `t` metres along the shaft from the grip. */
+    const at = (t: number, side = 0, up = 0) =>
+      new THREE.Vector3(dir.x * t + side, dir.y * t + up, dir.z * t);
+    /** Align a Y-axis mesh (a cylinder) with the shaft. */
+    const alongShaft = Math.PI / 2 + TILT;
+
+    // shaft
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.98, 8), steel());
+    shaft.position.copy(at(0.42));
+    shaft.rotation.x = alongShaft;
+
+    // engine on the near end, with its pull-start cap on top
+    const motor = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.15, 0.2), orange);
+    motor.position.copy(at(-0.06));
+    motor.rotation.x = alongShaft;
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.05, 10), grey);
+    cap.position.copy(at(-0.06, 0, 0.1));
+    const tank = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.08, 0.1), accent);
+    tank.position.copy(at(-0.02, 0.02, -0.1));
+
+    // loop handle, a hoop stood perpendicular to the shaft a third of the way down
+    const handle = new THREE.Mesh(new THREE.TorusGeometry(0.068, 0.016, 6, 14), shell('#2f2f33', 0.8));
+    handle.position.copy(at(0.26));
+    handle.rotation.x = alongShaft;
+
+    // the grip in your hand, running across the tool
+    const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, 0.15, 8), rubber());
     grip.rotation.z = Math.PI / 2;
-    grip.position.set(0, 0.05, -0.16);
-    const guard = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.02, 0.14), orange);
-    guard.position.set(-0.06, -0.28, 0.62);
-    guard.rotation.z = 0.35;
+    grip.position.set(0, 0.01, -0.02);
+
+    // the cutting head: hub on the shaft axis, line lying in the plane the head spins in
     const head = new THREE.Group();
-    head.position.set(0, -0.31, 0.65);
-    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.06, 10), grey);
-    const line1 = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.008, 0.012), accent);
+    head.position.copy(at(0.94));
+    head.rotation.x = alongShaft;
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.058, 0.05, 10), grey);
+    const line1 = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.008, 0.012), accent);
     const line2 = line1.clone();
     line2.rotation.y = Math.PI / 2;
     head.add(hub, line1, line2);
-    root.add(motor, cap, shaft, handle, grip, guard, head);
+
+    // guard: a flat shield above the head, on the operator's side
+    const guard = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.016, 0.17), orange);
+    guard.position.copy(at(0.8, -0.11, 0.07));
+    guard.rotation.set(0.15, 0.25, 0.1);
+
+    root.add(shaft, motor, cap, tank, handle, grip, head, guard);
     root.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
     return { root, run: head };
   }
