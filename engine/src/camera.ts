@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { dampK } from './math';
+import { dampK, lerpAngle } from './math';
 
 export interface FollowCameraOptions {
   /** Camera offset from the focus point (above and behind). */
@@ -20,6 +20,10 @@ export interface FollowCameraOptions {
   traumaDecay: number;
   shakeMove: number;
   shakeRoll: number;
+  /** How quickly the view swings behind a vehicle that's driving forward (per second). */
+  headingRate: number;
+  /** Forward speed (units/s) above which the view starts following the heading. */
+  headingMinSpeed: number;
 }
 
 export const DEFAULT_FOLLOW: FollowCameraOptions = {
@@ -34,6 +38,8 @@ export const DEFAULT_FOLLOW: FollowCameraOptions = {
   traumaDecay: 1.7,
   shakeMove: 1.2,
   shakeRoll: 0.08,
+  headingRate: 3.5,
+  headingMinSpeed: 0.8,
 };
 
 /** A smoothed, leading, top-down chase camera with trauma-based screen shake and FOV kick. */
@@ -42,8 +48,10 @@ export class FollowCamera {
   focus = new THREE.Vector3();
   trauma = 0;
   /**
-   * The yaw the camera is actually at. The player owns it outright (drag / snap), so the direction
-   * "up" on the keys never drifts underneath them. Nothing auto-rotates the view any more.
+   * The yaw the camera is actually at. The player owns it (drag / snap), and vehicles with
+   * heading-relative controls can also ease it behind themselves while driving forward
+   * (see followHeading). Camera-relative characters must NOT use followHeading: their keys
+   * are turned by this angle, so a chasing view would rotate the controls underneath them.
    */
   angle = 0;
   /** Height multiplier: the game raises the view a little for a big vehicle. Eased by setPull(). */
@@ -90,6 +98,17 @@ export class FollowCamera {
 
   /** Turn the camera by hand (radians). */
   turn(by: number) { this.angle += by; }
+
+  /**
+   * Ease the view behind a vehicle that's driving forward. Does nothing at or below
+   * `headingMinSpeed`, so reversing, idling and parking never flip the view around.
+   * Only safe with heading-relative controls (throttle + steer): with camera-relative
+   * keys the swing would drag "up" around with it and a held turn would spiral.
+   */
+  followHeading(dt: number, heading: number, forwardSpeed: number) {
+    if (forwardSpeed <= this.o.headingMinSpeed || dt <= 0) return;
+    this.angle = lerpAngle(this.angle, heading, dampK(this.o.headingRate, dt));
+  }
 
   /**
    * Jump straight to the target with no glide (after teleports, level loads, cutscenes). A teleport

@@ -305,7 +305,7 @@ export class Hud {
       ['L', 'Ramps down / winch the mower on (or drive it up yourself)'],
       ['T', 'Trailer menu: swap tools'],
       ['G', 'Pour the spare fuel can'],
-      ['Middle-drag', 'Orbit the camera (Shift+drag also works). It holds still while you drive and settles behind you when you stop.'],
+      ['Middle-drag', 'Orbit the camera (Shift+drag also works). In vehicles it swings in behind you while driving forward; on foot it holds still until you move it.'],
       ['R', 'Snap the camera in behind you'],
       ['C', 'Schedule'],
       ['H', 'Replay the tutorial'],
