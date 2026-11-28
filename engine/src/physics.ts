@@ -110,14 +110,12 @@ export class Mover {
   }
 
   /**
-   * Car-like driving for vehicles: `throttle` (-1..1, + = forward) eases the forward speed
-   * toward throttle * maxSpeed, and `steer` (-1..1, + = right) turns the heading at a rate
-   * proportional to speed. The body can't strafe — steering without throttle does nothing
-   * (unless `spinRate` > 0, a zero-turn that can spin in place) — and in reverse the wheel
-   * turns the nose the other way, like a real truck. Because the inputs are heading-relative,
-   * a camera that swings behind the vehicle can't rotate the controls underneath the driver.
+   * Arcade car handling: throttle eases longitudinal speed toward the requested gear, opposite
+   * throttle brakes harder before accelerating the other way, and signed steering rotates the
+   * heading around the vertical axis. A little lateral grip lag gives the vehicle momentum through
+   * turns instead of making it feel glued to rails. `spinRate` lets zero-turn mowers pivot while stopped.
    */
-  updateCar(dt: number, throttle: number, steer: number, world: CollisionWorld, speedMul = 1, spinRate = 0): Hit {
+  updateCar(dt: number, throttle: number, steer: number, world: CollisionWorld, speedMul = 1, spinRate = 0, lateralGrip = 7): Hit {
     const o = this.o;
     const spd = o.maxSpeed * speedMul;
     const th = clamp(throttle, -1, 1), st = clamp(steer, -1, 1);
@@ -126,22 +124,25 @@ export class Mover {
     // forward speed along the current heading
     const sy0 = Math.sin(this.yaw), cy0 = Math.cos(this.yaw);
     let fwd = this.vx * sy0 + this.vz * cy0;
-    const k = dampK(Math.abs(th) > 0.05 ? o.accel : o.decel, dt);
+    const braking = Math.abs(th) > 0.05 && th * fwd < -0.05;
+    const response = Math.abs(th) > 0.05 ? o.accel * (braking ? 1.8 : 1) : o.decel;
+    const k = dampK(response, dt);
     fwd += (th * spd - fwd) * k;
 
-    // turn: yaw rate proportional to speed, so the turning radius is roughly constant and
-    // reverse steering flips the nose the other way. `turnRate` is scaled down from the
-    // omnidirectional smoothing rate to a yaw rate in rad/s. A zero-turn (`spinRate` > 0)
-    // also spins in place when the throttle is released, fading out as you drive.
+    // Steering rotates the heading at speed and naturally reverses its travel arc while backing.
+    // Rate grows with speed, keeping the turn radius game-like and predictable. A zero-turn mower
+    // can still spin while stopped; the pivot fades as throttle is applied.
     if (dt > 0 && spd > 0.01) {
       const spin = spinRate * (1 - Math.min(1, Math.abs(th)));
-      this.yaw += -st * (o.turnRate * 0.28 * (fwd / spd) + spin) * dt;
+      this.yaw += st * (o.turnRate * 0.28 * (fwd / spd) + spin) * dt;
     }
 
-    // velocity is always along the (new) heading: no sideways slide
+    // Keep a little of the old world velocity while the body turns, then let tire grip pull the
+    // car back onto its new heading. This gives a short, controllable slide instead of a hard snap.
     const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
-    this.vx = sy * fwd;
-    this.vz = cy * fwd;
+    const grip = dampK(lateralGrip, dt);
+    this.vx += (sy * fwd - this.vx) * grip;
+    this.vz += (cy * fwd - this.vz) * grip;
 
     // lean from acceleration, in the body's own frame (same as update())
     if (dt > 0) {

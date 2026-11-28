@@ -41,6 +41,7 @@ export interface Lot {
   centre: { x: number; z: number };
   houseBox: AABB;
   houseMats: THREE.Material[];
+  houseWire: THREE.LineBasicMaterial | null;
   fade: number;
   lawnCells: number[];
   pavedCells: number[];
@@ -51,7 +52,7 @@ export interface Lot {
   gnomeSpots: { x: number; z: number }[];
 }
 
-export interface Tree { x: number; z: number; mat: THREE.MeshStandardMaterial; mats: THREE.MeshStandardMaterial[]; fade: number; h: number }
+export interface Tree { x: number; z: number; mats: THREE.MeshStandardMaterial[]; wire: THREE.LineBasicMaterial; fade: number; h: number }
 
 export interface Street {
   id: number;
@@ -112,6 +113,12 @@ export function groundFor(w: { grounds: Ground[] }, z: number) {
 
 const WALLS = ['#e9dcc4', '#c9d8e4', '#f1e4a8', '#d9c0b0', '#cfe0c4', '#e8c9c9', '#d6d0e8', '#f2efe8'];
 const ROOFS = ['#6b4a3a', '#4a5560', '#7a3b32', '#3f4a3a', '#5a4a6a', '#665544'];
+const gardenLeafGeo = new THREE.SphereGeometry(0.3, 9, 7);
+const gardenFlowerGeo = new THREE.SphereGeometry(0.085, 8, 6);
+const gardenStemGeo = new THREE.CylinderGeometry(0.018, 0.025, 0.34, 5);
+const gardenLeafMats = ['#477b36', '#5b8b3e', '#71954a'].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.96, flatShading: true }));
+const gardenStemMat = new THREE.MeshStandardMaterial({ color: '#49763a', roughness: 0.95 });
+const gardenFlowerMats = ['#f2c75c', '#e989a2', '#f5eee0', '#9c8bd1'].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.78, flatShading: true }));
 
 export function buildWorld(seed = 1): World {
   const rng = makeRng(seed);
@@ -130,7 +137,7 @@ export function buildWorld(seed = 1): World {
   sc.left = -30; sc.right = 30; sc.top = 30; sc.bottom = -30; sc.near = 1; sc.far = 110;
   sun.shadow.bias = -0.0005;
   sun.shadow.normalBias = 0.025;
-  sun.shadow.radius = 2.2;
+  sun.shadow.radius = 3;
   scene.add(sun, sun.target);
   const { sky, clouds } = buildSky(scene);
 
@@ -169,7 +176,7 @@ export function buildWorld(seed = 1): World {
         path: [doorLx - 0.7, doorLx + 0.7, WALK, HOUSE_D0],
         beds, doorLx,
         door: { x: 0, z: 0 }, centre: { x: 0, z: 0 },
-        houseBox: { minX: 0, maxX: 0, minZ: 0, maxZ: 0 }, houseMats: [], fade: 1,
+        houseBox: { minX: 0, maxX: 0, minZ: 0, maxZ: 0 }, houseMats: [], houseWire: null, fade: 1,
         lawnCells: [], pavedCells: [], bedCells: [], edgeCells: [], hedges: [], gnomeSpots: [],
       };
       lot.door = toWorld(lot, doorLx, 16.9);
@@ -189,6 +196,7 @@ export function buildWorld(seed = 1): World {
     else { g.position.set(lot.x0 + LOT_W, 0, lot.zc); g.rotation.y = Math.PI; }
     scene.add(g);
     buildHouse(g, lot, pick(WALLS), pick(ROOFS), rng);
+    addGardenPlanting(g, lot, rng);
     boxes.push(lot.houseBox);
 
     const mbLx = lot.drive[1] + 0.6;
@@ -357,6 +365,15 @@ export function buildWorld(seed = 1): World {
       boxes.push({ minX: x - 0.35, maxX: x + 0.35, minZ: z - 0.35, maxZ: z + 0.35 });
     }
 
+    // Repeated warm-toned streetlamps give the neighborhood a clear streetscape silhouette.
+    for (let x = MIN_X + 9; x < CROSS_X0 - 2; x += 24) {
+      for (const side of [-1, 1] as const) {
+        const lamp = buildStreetLight(side);
+        lamp.position.set(x, 0, zc + side * 5.15);
+        scene.add(lamp);
+      }
+    }
+
     let barrier: Street['barrier'] = null;
     if (si > 0) {
       const bz = zc - BAND;
@@ -484,6 +501,12 @@ function paintGround(w: { grounds: Ground[] }, lots: Lot[], kind: Uint8Array, ow
     const zc = streetZ(si);
     rect({ minX: MIN_X, maxX: MAX_X, minZ: zc - ROAD, maxZ: zc + ROAD }, '#3a3c41');
     detail({ minX: MIN_X, maxX: MAX_X, minZ: zc - ROAD, maxZ: zc + ROAD }, 'asphalt');
+    // Fine lane-edge paint and a zebra crossing at the neighborhood junction.
+    rect({ minX: MIN_X, maxX: CROSS_X0 - 3, minZ: zc - ROAD + 0.28, maxZ: zc - ROAD + 0.36 }, 'rgba(245,244,232,0.72)');
+    rect({ minX: MIN_X, maxX: CROSS_X0 - 3, minZ: zc + ROAD - 0.36, maxZ: zc + ROAD - 0.28 }, 'rgba(245,244,232,0.72)');
+    for (let x = CROSS_X0 - 3; x < CROSS_X0 - 0.4; x += 0.95) {
+      rect({ minX: x, maxX: Math.min(x + 0.48, CROSS_X0 - 0.4), minZ: zc - ROAD + 0.35, maxZ: zc + ROAD - 0.35 }, 'rgba(247,246,235,0.86)');
+    }
     // kerb
     rect({ minX: MIN_X, maxX: CROSS_X0, minZ: zc + ROAD, maxZ: zc + ROAD + 0.15 }, '#a8a49a');
     rect({ minX: MIN_X, maxX: CROSS_X0, minZ: zc - ROAD - 0.15, maxZ: zc - ROAD }, '#a8a49a');
@@ -500,6 +523,16 @@ function paintGround(w: { grounds: Ground[] }, lots: Lot[], kind: Uint8Array, ow
   rect({ minX: CROSS_X0, maxX: CROSS_X1, minZ: -ROAD, maxZ: lastZ + ROAD }, '#3a3c41');
   detail({ minX: CROSS_X0, maxX: CROSS_X1, minZ: -ROAD, maxZ: lastZ + ROAD }, 'asphalt');
   for (let z = -ROAD; z < lastZ; z += 4) rect({ minX: (CROSS_X0 + CROSS_X1) / 2 - 0.08, maxX: (CROSS_X0 + CROSS_X1) / 2 + 0.08, minZ: z, maxZ: z + 2 }, '#e8c547');
+  // Crosswalk bars on both sides of each cross-street junction.
+  for (const street of STREETS) {
+    const zc = streetZ(STREETS.indexOf(street));
+    for (const direction of [-1, 1]) {
+      const z = zc + direction * (ROAD + 0.8);
+      for (let x = CROSS_X0 + 0.25; x < CROSS_X1 - 0.1; x += 0.95) {
+        rect({ minX: x, maxX: Math.min(x + 0.52, CROSS_X1 - 0.1), minZ: z - 0.22, maxZ: z + 0.22 }, 'rgba(247,246,235,0.86)');
+      }
+    }
+  }
 
   for (const lot of lots) {
     const dr = rectWorld(lot, lot.drive);
@@ -527,11 +560,19 @@ function paintGround(w: { grounds: Ground[] }, lots: Lot[], kind: Uint8Array, ow
       break;
     }
   }
-  // grass tufts: little darker clumps so the lawn isn't a flat green
+  // Fine, rounded color variation keeps the turf from reading as a grid of flat green tiles.
   for (let i = 0; i < kind.length; i++) {
-    if (kind[i] !== K_LAWN || rng() < 0.55) continue;
-    const x = MIN_X + (i % GW) * CELL + rng() * 0.3, z = MIN_Z + Math.floor(i / GW) * CELL + rng() * 0.3;
-    rect({ minX: x, maxX: x + 0.3, minZ: z, maxZ: z + 0.3 }, rng() < 0.5 ? '#355f24' : '#4a7d32');
+    if (kind[i] !== K_LAWN || rng() < 0.66) continue;
+    const gx = i % GW, gz = Math.floor(i / GW);
+    const x = (gx + 0.5 + (rng() - 0.5) * 0.6) * CELL * PX;
+    const z = MIN_Z + (gz + 0.5 + (rng() - 0.5) * 0.6) * CELL;
+    const g = w.grounds[Math.floor((z - MIN_Z) / (BAND * 2))];
+    if (!g) continue;
+    const ctx = g.ctx, radius = 0.8 + rng() * 1.8;
+    ctx.fillStyle = rng() < 0.72 ? 'rgba(28,58,20,0.10)' : 'rgba(188,205,120,0.12)';
+    ctx.beginPath();
+    ctx.ellipse(x, (z - g.minZ) * PX, radius, radius * (0.4 + rng() * 0.55), rng() * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
   }
 }
 
@@ -590,11 +631,27 @@ function shadowed<T extends THREE.Object3D>(o: T) {
   return o;
 }
 
+/** A subdued edge trace, revealed only while its model is faded to help preserve its silhouette. */
+function addWireOutline(root: THREE.Object3D, color = '#25311f') {
+  const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0, depthWrite: false, toneMapped: false });
+  const meshes: THREE.Mesh[] = [];
+  root.traverse((o) => { if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh); });
+  for (const mesh of meshes) {
+    const edges = new THREE.EdgesGeometry(mesh.geometry, 22);
+    const lines = new THREE.LineSegments(edges, material);
+    lines.scale.setScalar(1.004);
+    lines.renderOrder = 2;
+    mesh.add(lines);
+  }
+  return material;
+}
+
 /**
  * A suburban house: textured siding walls, a hipped shingle roof with gable ends, a panelled garage
  * door, a front door with a porch lantern and step, and windows with trim, sills and curtains.
  */
-function buildHouse(g: THREE.Group, lot: Lot, wall: string, roof: string, rng: () => number) {
+function buildHouse(parent: THREE.Group, lot: Lot, wall: string, roof: string, rng: () => number) {
+  const g = new THREE.Group();
   const [x0, x1, d0, d1] = lot.house;
   const w = x1 - x0, depth = d1 - d0, cx = (x0 + x1) / 2, cz = (d0 + d1) / 2;
   const mk = (c: string, opts: THREE.MeshStandardMaterialParameters = {}) => {
@@ -698,6 +755,65 @@ function buildHouse(g: THREE.Group, lot: Lot, wall: string, roof: string, rng: (
     g.add(pane, surround, sill, mullion, drapes);
   }
   shadowed(g);
+  lot.houseWire = addWireOutline(g);
+  parent.add(g);
+}
+
+/** Small layered shrubs and seasonal flowers bring color to the otherwise flat mulch beds. */
+function addGardenPlanting(g: THREE.Group, lot: Lot, rng: () => number) {
+  for (const bed of lot.beds) {
+    const width = bed[1] - bed[0];
+    const count = Math.max(1, Math.floor(width / 1.35));
+    for (let i = 0; i < count; i++) {
+      const lx = bed[0] + (i + 0.5) * width / count;
+      const d = (bed[2] + bed[3]) / 2 + (rng() - 0.5) * 0.24;
+      const shrub = new THREE.Group();
+      const pieces = 2 + Math.floor(rng() * 2);
+      for (let p = 0; p < pieces; p++) {
+        const leaf = new THREE.Mesh(gardenLeafGeo, gardenLeafMats[Math.floor(rng() * gardenLeafMats.length)]);
+        leaf.position.set((rng() - 0.5) * 0.34, 0.22 + rng() * 0.13, (rng() - 0.5) * 0.25);
+        leaf.scale.set(0.8 + rng() * 0.6, 0.65 + rng() * 0.5, 0.8 + rng() * 0.5);
+        shrub.add(leaf);
+      }
+      if (rng() < 0.72) {
+        const bloomCount = 2 + Math.floor(rng() * 3);
+        for (let b = 0; b < bloomCount; b++) {
+          const stem = new THREE.Mesh(gardenStemGeo, gardenStemMat);
+          stem.position.set((rng() - 0.5) * 0.38, 0.31, (rng() - 0.5) * 0.28);
+          shrub.add(stem);
+          const flower = new THREE.Mesh(gardenFlowerGeo, gardenFlowerMats[Math.floor(rng() * gardenFlowerMats.length)]);
+          flower.position.copy(stem.position).y += 0.17;
+          flower.scale.set(1, 0.72, 1);
+          shrub.add(flower);
+        }
+      }
+      shrub.position.set(lx, 0, d);
+      shrub.traverse((obj) => { if ((obj as THREE.Mesh).isMesh) { obj.castShadow = true; obj.receiveShadow = true; } });
+      g.add(shrub);
+    }
+  }
+}
+
+function buildStreetLight(roadSide: 1 | -1) {
+  const g = new THREE.Group();
+  const metal = new THREE.MeshStandardMaterial({ color: '#3d4946', roughness: 0.52, metalness: 0.48 });
+  const trim = new THREE.MeshStandardMaterial({ color: '#b99b62', roughness: 0.5, metalness: 0.45 });
+  const glow = new THREE.MeshStandardMaterial({ color: '#fff0c2', emissive: '#ffc85a', emissiveIntensity: 1.15, roughness: 0.32 });
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.24, 0.18, 10), metal);
+  base.position.y = 0.09;
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.09, 3.35, 9), metal);
+  pole.position.y = 1.76;
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.105, 0.12, 10), trim);
+  collar.position.y = 3.12;
+  const arm = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 0.82), metal);
+  arm.position.set(0, 3.27, -roadSide * 0.36);
+  const shade = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.23, 0.13, 10), metal);
+  shade.position.set(0, 3.19, -roadSide * 0.74);
+  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 8), glow);
+  bulb.position.set(0, 3.1, -roadSide * 0.74);
+  g.add(base, pole, collar, arm, shade, bulb);
+  g.traverse((obj) => { if ((obj as THREE.Mesh).isMesh) { obj.castShadow = true; obj.receiveShadow = true; } });
+  return g;
 }
 
 function addMailbox(g: THREE.Group, lx: number, d: number) {
@@ -716,33 +832,35 @@ function addMailbox(g: THREE.Group, lx: number, d: number) {
 /** A tree: a tapered trunk with bark, roots flaring at the base, and a cloud of leafy blobs. */
 function addTree(scene: THREE.Scene, x: number, z: number, rng: () => number): Tree {
   const h = 2.8 + rng() * 1.6;
-  const trunkMat = new THREE.MeshStandardMaterial({ color: '#6b4a2e', roughness: 0.95, flatShading: true });
+  const root = new THREE.Group();
+  root.position.set(x, 0, z);
+  const trunkMat = new THREE.MeshStandardMaterial({ color: '#6b4a2e', roughness: 0.95, flatShading: true, transparent: true });
   const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.34, h, 9), trunkMat);
-  trunk.position.set(x, h / 2, z);
+  trunk.position.set(0, h / 2, 0);
   trunk.rotation.y = rng() * 3;
   // a couple of branches
   const branches: THREE.Mesh[] = [];
   for (let k = 0; k < 3; k++) {
     const a = rng() * Math.PI * 2, bl = 0.9 + rng() * 0.7;
     const b = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.11, bl, 6), trunkMat);
-    b.position.set(x + Math.cos(a) * bl * 0.32, h * 0.78 + rng() * 0.6, z + Math.sin(a) * bl * 0.32);
+    b.position.set(Math.cos(a) * bl * 0.32, h * 0.78 + rng() * 0.6, Math.sin(a) * bl * 0.32);
     b.rotation.set(Math.sin(a) * 0.8, 0, -Math.cos(a) * 0.8);
     branches.push(b);
   }
   const hue = 0.26 + rng() * 0.08;
   const mat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color().setHSL(hue, 0.48, 0.26 + rng() * 0.08),
-    roughness: 0.85, metalness: 0, flatShading: true, transparent: true,
+    color: new THREE.Color().setHSL(hue, 0.42, 0.27 + rng() * 0.07),
+    roughness: 0.94, metalness: 0, transparent: true,
   });
   const matDark = new THREE.MeshStandardMaterial({
-    color: new THREE.Color().setHSL(hue + 0.02, 0.5, 0.19), roughness: 0.9, metalness: 0, flatShading: true, transparent: true,
+    color: new THREE.Color().setHSL(hue + 0.015, 0.44, 0.18 + rng() * 0.025), roughness: 0.96, metalness: 0, transparent: true,
   });
   const crown = new THREE.Group();
   // darker inner blobs, brighter outer ones, so the canopy has depth
   for (let k = 0; k < 6; k++) {
     const r = 1.15 + rng() * 0.75;
     const inner = k < 3;
-    const b = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 1), inner ? matDark : mat);
+    const b = new THREE.Mesh(new THREE.SphereGeometry(r, 12, 9), inner ? matDark : mat);
     const a = (k / 6) * Math.PI * 2 + rng();
     const rad = inner ? 0.35 : 0.85;
     b.position.set(Math.cos(a) * rad, h + 0.5 + rng() * 1.1, Math.sin(a) * rad);
@@ -750,9 +868,10 @@ function addTree(scene: THREE.Scene, x: number, z: number, rng: () => number): T
     b.scale.y = 0.82 + rng() * 0.3;
     crown.add(b);
   }
-  crown.position.set(x, 0, z);
-  scene.add(shadowed(trunk), ...branches.map((b) => shadowed(b)), shadowed(crown));
-  return { x, z, mat, mats: [mat, matDark], fade: 1, h };
+  root.add(shadowed(trunk), ...branches.map((b) => shadowed(b)), shadowed(crown));
+  const wire = addWireOutline(root);
+  scene.add(root);
+  return { x, z, mats: [trunkMat, mat, matDark], wire, fade: 1, h };
 }
 
 function buildGasStation() {

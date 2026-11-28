@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { contactShadow } from './avatar';
+import { buildHead, contactShadow } from './avatar';
 
 export interface MowerModel {
   /** Positioned and turned by the game (via poseBody). */
@@ -28,7 +28,7 @@ export const PLAYER_COLORS: MowerColors = { body: '#c8362a', shirt: '#2f5d9e', c
 export const CREW_COLORS: MowerColors = { body: '#2f9e57', shirt: '#f2efe8', cap: '#1f6f43' };
 export const RIVAL_COLORS: MowerColors = { body: '#2b6fd6', shirt: '#14365f', cap: '#9be15d' };
 
-const paint = (color: string, metalness = 0.35, roughness = 0.38) =>
+const paint = (color: string, metalness = 0.18, roughness = 0.48) =>
   new THREE.MeshStandardMaterial({ color, metalness, roughness });
 const plastic = (color: string, roughness = 0.75) => new THREE.MeshStandardMaterial({ color, roughness, metalness: 0.05 });
 const METAL = () => new THREE.MeshStandardMaterial({ color: '#b6bcc2', metalness: 0.85, roughness: 0.32 });
@@ -140,14 +140,10 @@ export function buildMower(colors: MowerColors = PLAYER_COLORS): MowerModel {
   torso.scale.set(1, 1, 0.82);
   const bib = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.22, 0.06), plastic('#3d5a86', 0.95));
   bib.position.set(0, 1.3, -0.25);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.155, 16, 12), skin);
+  const head = buildHead(skin, plastic(colors.cap, 0.8));
   head.position.set(0, 1.73, -0.4);
-  const cap = new THREE.Mesh(new THREE.SphereGeometry(0.165, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2), plastic(colors.cap, 0.8));
-  cap.position.set(0, 1.74, -0.4);
-  const brim = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.03, 0.2), plastic(colors.cap, 0.8));
-  brim.position.set(0, 1.76, -0.22);
   const driver = new THREE.Group();
-  driver.add(torso, bib, head, cap, brim);
+  driver.add(torso, bib, head);
   for (const x of [-0.21, 0.21]) {
     const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.052, 0.34, 4, 8), plastic(colors.shirt, 0.9));
     arm.position.set(x, 1.42, -0.2);

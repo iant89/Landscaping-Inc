@@ -1,5 +1,7 @@
 import { UPGRADES, UpKey, WEEKDAYS, fmtHour } from './config';
 
+export type Difficulty = 'easy' | 'normal' | 'hard';
+
 export interface JobLine {
   label: string;
   lawn: number;
@@ -7,6 +9,7 @@ export interface JobLine {
   leaves: number | null;
   edge: number | null;
   hedges: number | null;
+  clippings: number | null;
   due: string;
   here: boolean;
   trial: boolean;
@@ -227,7 +230,7 @@ export class Hud {
     }
     if (d.loading > 0) chips.push('<span class="chip-mode loading">⛓️ hitching up…</span>');
     if (d.mowerLoaded) chips.push('<span class="chip-mode">🛖 mower stowed <span class="k">L</span></span>');
-    if (d.tool) chips.push(`<span class="chip-mode tool">${d.tool} <b>${Math.ceil(d.toolFuel * 100)}%</b></span>`);
+    if (d.tool) chips.push(`<span class="chip-mode tool">${d.tool} <b>${d.toolFuel < 0 ? 'manual' : `${Math.ceil(d.toolFuel * 100)}%`}</b></span>`);
     chips.push(`<span class="chip-mode"><span class="k">E</span> ${d.mounted ? 'get off' : 'climb on'}</span>`);
     if (d.stranded) chips.push('<span class="chip-mode warn">⛽ stranded — follow the arrow</span>');
     this.modeEl.innerHTML = chips.join('');
@@ -247,9 +250,10 @@ export class Hud {
         j.leaves !== null ? `<span class="${j.leaves <= 1 ? 'ok' : ''}">🍂 ${j.leaves <= 1 ? '✓' : j.leaves}</span>` : '',
         j.edge !== null ? `<span class="${j.edge >= 0.9 ? 'ok' : ''}">📏 ${j.edge >= 0.9 ? '✓' : `${Math.floor(j.edge * 100)}%`}</span>` : '',
         j.hedges !== null ? `<span class="${j.hedges === 0 ? 'ok' : ''}">✂️ ${j.hedges === 0 ? '✓' : j.hedges}</span>` : '',
+        j.clippings !== null ? `<span class="${j.clippings === 0 ? 'ok' : ''}">🌿 ${j.clippings === 0 ? '✓' : j.clippings}</span>` : '',
       ].join('');
       return `<div class="job${j.here ? ' here' : ''}">
-        <div class="job-head"><span>${j.trial ? '<em>trial</em> ' : ''}${j.label}</span><span class="due">${j.crew ? `👷 ${j.crew}` : `due ${j.due}`}</span></div>
+        <div class="job-head"><span>${j.trial ? '<em>trial</em> ' : ''}${j.label}</span><span class="due">${j.crew ? `👷 ${j.crew}` : j.due === 'no deadline' ? j.due : `due ${j.due}`}</span></div>
         <div class="bars"><div class="bar"><div style="width:${Math.min(100, j.lawn * 100).toFixed(0)}%"></div></div>${chips}</div>
       </div>`;
     }).join('') + (d.jobs.length > shown.length ? `<div class="more">+${d.jobs.length - shown.length} more · press C for the week</div>` : '');
@@ -301,7 +305,8 @@ export class Hud {
 
   // ------------------------------------------------------------------ title
   /** Splash screen: brand and pitch on the left, the menu on the right. */
-  title(hasSave: boolean, onNew: () => void, onContinue: () => void) {
+  title(hasSave: boolean, onNew: () => void, onContinue: () => void, difficulty: Difficulty, onDifficulty: (value: Difficulty) => void) {
+    let currentDifficulty = difficulty;
     const screen = h('div', 'title-screen', `
       <div class="title-hero">
         <div class="brand">
@@ -320,7 +325,7 @@ export class Hud {
         </div>
         <ul class="brief">
           <li><b>Knock</b> on doors marked <b class="bang">!</b> and pitch your price.</li>
-          <li>Customers book <b>1–3 cuts a week</b> — miss a visit and it's a strike.</li>
+          <li>Customers book <b>1–3 cuts a week</b> — missed visits are handled according to difficulty.</li>
           <li>Upsell leaves 🍂, edges 📏 and hedges ✂️ for a bigger ticket.</li>
           <li>Rain grows grass, wind brings leaves, and <b>Green Giant Lawns</b> wants your streets.</li>
         </ul>
@@ -329,6 +334,11 @@ export class Hud {
         <div class="menu-card">
           <div class="menu-eyebrow">${hasSave ? 'Welcome back' : 'New business'}</div>
           ${hasSave ? '' : '<div class="menu-headline">Ready to mow?</div>'}
+          <label class="difficulty-picker"><span>Difficulty</span><select data-act="difficulty" aria-label="Difficulty">
+            <option value="easy"${difficulty === 'easy' ? ' selected' : ''}>Easy · no cutting deadlines</option>
+            <option value="normal"${difficulty === 'normal' ? ' selected' : ''}>Normal · standard deadlines</option>
+            <option value="hard"${difficulty === 'hard' ? ' selected' : ''}>Hard · tighter deadlines</option>
+          </select></label>
           <button class="menu-btn primary" data-act="go">
             <span class="mb-icon">${hasSave ? '▶' : '🌱'}</span>
             <span class="mb-text">
@@ -353,15 +363,19 @@ export class Hud {
           </div>
         </div>
       </div>`);
+    screen.querySelector<HTMLSelectElement>('[data-act="difficulty"]')!.onchange = (event) => {
+      currentDifficulty = (event.currentTarget as HTMLSelectElement).value as Difficulty;
+      onDifficulty(currentDifficulty);
+    };
     screen.querySelector<HTMLButtonElement>('[data-act="go"]')!.onclick = hasSave ? onContinue : onNew;
     const nw = screen.querySelector<HTMLButtonElement>('[data-act="new"]');
     if (nw) nw.onclick = onNew;
     screen.querySelector<HTMLButtonElement>('[data-act="help"]')!.onclick =
-      () => this.controls(() => this.title(hasSave, onNew, onContinue));
+      () => this.controls(() => this.title(hasSave, onNew, onContinue, currentDifficulty, onDifficulty));
     const opts: DialogOption[] = [];
     if (hasSave) opts.push({ label: 'Continue', key: '⏎', primary: true, onPick: onContinue });
     opts.push({ label: hasSave ? 'New business' : 'Start mowing', key: hasSave ? 'N' : '⏎', primary: !hasSave, onPick: onNew });
-    opts.push({ label: 'How to play', key: 'H', onPick: () => this.controls(() => this.title(hasSave, onNew, onContinue)) });
+    opts.push({ label: 'How to play', key: 'H', onPick: () => this.controls(() => this.title(hasSave, onNew, onContinue, currentDifficulty, onDifficulty)) });
     this.open(screen, opts, 'title');
   }
 

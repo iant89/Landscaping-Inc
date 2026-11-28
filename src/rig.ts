@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { textTexture } from './world';
+import { buildFuelCan } from './avatar';
 
 export interface RigModel {
   /** Positioned and turned by the game. The trailer hangs off the back of this. */
@@ -9,13 +10,11 @@ export interface RigModel {
   wheels: THREE.Mesh[];
   /** Rear axle of the truck: the trailer's tow ball follows this. */
   hitch: THREE.Vector3;
-  /** Spare cans ride here and are hidden as they're used. */
-  cans: THREE.Object3D[];
   /** Hand tools hanging on the trailer's rack, in TOOLS order, hidden while they're in your hands. */
   toolSlots: THREE.Group[];
 }
 
-const paint = (color: string, metalness = 0.4, roughness = 0.35) => new THREE.MeshStandardMaterial({ color, metalness, roughness });
+const paint = (color: string, metalness = 0.22, roughness = 0.46) => new THREE.MeshStandardMaterial({ color, metalness, roughness });
 const plastic = (color: string, roughness = 0.75) => new THREE.MeshStandardMaterial({ color, roughness, metalness: 0.05 });
 const METAL = () => new THREE.MeshStandardMaterial({ color: '#b6bcc2', metalness: 0.85, roughness: 0.3 });
 const RUBBER = () => new THREE.MeshStandardMaterial({ color: '#232326', roughness: 0.95, metalness: 0 });
@@ -29,7 +28,7 @@ export function buildTruck(): RigModel {
   const root = new THREE.Group();
   const body = new THREE.Group();
   root.add(body);
-  const green = paint(RIG_GREEN, 0.35, 0.4);
+  const green = paint(RIG_GREEN, 0.2, 0.48);
   const glass = new THREE.MeshStandardMaterial({ color: '#8fc4e0', roughness: 0.08, metalness: 0.7 });
   const dark = plastic('#26262a');
   const steel = METAL();
@@ -94,18 +93,6 @@ export function buildTruck(): RigModel {
     panel.position.set(x, 1.28, 1.6);
     body.add(panel);
   }
-  // spare cans in the bed
-  const cans: THREE.Object3D[] = [];
-  for (const x of [-0.55, 0.55]) {
-    const canGroup = new THREE.Group();
-    canGroup.position.set(x, 1.06, -2.5);
-    const can = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.48, 0.24), new THREE.MeshStandardMaterial({ color: '#c8362a', roughness: 0.55, metalness: 0.15 }));
-    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.345, 0.06, 0.245), new THREE.MeshStandardMaterial({ color: '#f2c14a', roughness: 0.5 }));
-    stripe.position.y = 0.06;
-    canGroup.add(can, stripe);
-    body.add(canGroup);
-    cans.push(canGroup);
-  }
   // fuel tank under the bed
   const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 1.2, 12), steel);
   tank.rotation.z = Math.PI / 2;
@@ -128,7 +115,7 @@ export function buildTruck(): RigModel {
     wheels.push(tyre);
   }
   root.traverse((o) => { if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  return { root, body, wheels, hitch: new THREE.Vector3(0, 0.62, -3.2), cans, toolSlots: [] };
+  return { root, body, wheels, hitch: new THREE.Vector3(0, 0.62, -3.2), toolSlots: [] };
 }
 
 /** The equipment trailer: a flat tray with ramps, a tool rack and its own axle. Faces +Z. */
@@ -179,12 +166,12 @@ export function buildTrailer(): RigModel {
     hook.position.set(-0.6 + k * 0.4, 0.09, 0);
     rack.add(hook);
   }
-  // the hand tools hang from the rack: three slots, filled by the game when they're stowed
+  // the hand tools hang from the rack: four slots, filled by the game when they're stowed
   const toolSlots: THREE.Group[] = [];
-  for (let k = 0; k < 3; k++) {
+  for (let k = 0; k < 4; k++) {
     const slot = new THREE.Group();
-    slot.position.set(-0.55 + k * 0.55, 0.98, 1.22);
-    slot.rotation.z = (k - 1) * 0.12;
+    slot.position.set(-0.62 + k * 0.41, 0.98, 1.22);
+    slot.rotation.z = (k - 1.5) * 0.1;
     toolSlots.push(slot);
   }
   // mudguards over the wheels
@@ -208,12 +195,12 @@ export function buildTrailer(): RigModel {
     body.add(tyre, hub);
     wheels.push(tyre);
   }
-  // a spare can and a toolbox on the tray
-  const can = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.42, 0.22), new THREE.MeshStandardMaterial({ color: '#c8362a', roughness: 0.55, metalness: 0.15 }));
-  can.position.set(-0.55, 0.79, 0.55);
+  // The spare fuel can lives on the trailer; it no longer follows the player or mower.
+  const can = buildFuelCan();
+  can.position.set(-0.55, 0.58, 0.55);
   const box = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.28, 0.34), new THREE.MeshStandardMaterial({ color: '#c8362a', roughness: 0.5, metalness: 0.3 }));
   box.position.set(0.35, 0.72, -0.7);
   body.add(can, box);
   root.traverse((o) => { if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  return { root, body, wheels, hitch: new THREE.Vector3(0, 0.5, 2.4), cans: [], toolSlots };
+  return { root, body, wheels, hitch: new THREE.Vector3(0, 0.5, 2.4), toolSlots };
 }

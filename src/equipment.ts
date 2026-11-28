@@ -4,7 +4,7 @@ import * as THREE from 'three';
  * Handheld equipment. The mower is the riding machine (see mower.ts); these three are carried on
  * foot and do one service each, so you can finish a job without dragging the mower across the lawn.
  */
-export type ToolId = 'weedeater' | 'trimmer' | 'blower';
+export type ToolId = 'weedeater' | 'trimmer' | 'blower' | 'rake';
 
 export interface ToolDef {
   id: ToolId;
@@ -12,7 +12,7 @@ export interface ToolDef {
   short: string;
   icon: string;
   /** What service it earns you. */
-  action: 'edge' | 'hedge' | 'leaves';
+  action: 'edge' | 'hedge' | 'leaves' | 'clippings';
   /** How far from your feet it works (metres). */
   reach: number;
   /** Text for the trailer menu. */
@@ -22,7 +22,8 @@ export interface ToolDef {
 export const TOOLS: ToolDef[] = [
   { id: 'weedeater', name: 'Weed Eater', short: 'weedeater', icon: '🌿', action: 'edge', reach: 1.5, desc: 'Trims the grass creeping over paths and kerbs' },
   { id: 'trimmer', name: 'Hedge Trimmer', short: 'trimmer', icon: '✂️', action: 'hedge', reach: 1.7, desc: 'Cuts hedges back to shape as you brush past' },
-  { id: 'blower', name: 'Leaf Blower', short: 'blower', icon: '🍃', action: 'leaves', reach: 3.2, desc: 'Blows leaves off driveways and paths' },
+  { id: 'blower', name: 'Leaf Blower', short: 'blower', icon: '🍃', action: 'leaves', reach: 3.2, desc: 'Blows leaves and grass clippings away' },
+  { id: 'rake', name: 'Lawn Rake', short: 'rake', icon: '🧹', action: 'clippings', reach: 2.1, desc: 'Rakes loose grass clippings into a tidy pile' },
 ];
 
 export const toolDef = (id: ToolId) => TOOLS.find((t) => t.id === id)!;
@@ -138,6 +139,26 @@ export function buildTool(id: ToolId): ToolModel {
     root.add(body, motor, loop, grip, bar);
     root.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
     return { root, run: blade };
+  }
+
+  if (id === 'rake') {
+    const wood = new THREE.MeshStandardMaterial({ color: '#8e633b', roughness: 0.82 });
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.028, 1.2, 8), wood);
+    shaft.rotation.x = Math.PI / 2;
+    shaft.position.set(0, -0.42, 0.42);
+    const head = new THREE.Group();
+    head.position.set(0, -0.95, 0.95);
+    head.rotation.z = Math.PI / 2;
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.07, 0.08), steel());
+    head.add(bar);
+    for (let i = 0; i < 9; i++) {
+      const tine = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.22, 0.025), steel());
+      tine.position.set(-0.31 + i * 0.078, -0.12, 0);
+      head.add(tine);
+    }
+    root.add(shaft, head);
+    root.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
+    return { root, run: head };
   }
 
   // leaf blower: a fat body with a nozzle, a top handle and a shoulder strap

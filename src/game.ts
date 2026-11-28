@@ -6,12 +6,12 @@ import {
   SEC_PER_HOUR, STREETS, TOW_FEE, TOOL_BURN, UPGRADES, UpKey, WEEKDAYS, WEEKDAYS_LONG, YARD_ROAD_MAX, cellX, cellZ,
   fmtHour, streetAt, streetZ,
 } from './config';
-import { Flowers, Grass, Leaf, Leaves } from './lawn';
+import { ClippingSave, Clippings, Flowers, Grass, Leaf, Leaves } from './lawn';
 import { CREW_COLORS, MowerModel, RIVAL_COLORS, animateMower, buildMower } from './mower';
-import { WalkerModel, animateWalker, buildFuelCan, buildWalker } from './avatar';
+import { WalkerModel, animateWalker, buildWalker } from './avatar';
 import { TOOLS, ToolId, ToolModel, buildFuelArrow, buildTool, toolDef } from './equipment';
 import { RigModel, buildTrailer, buildTruck } from './rig';
-import { DialogOption, Hud, JobLine, ScheduleCell, ScheduleData } from './hud';
+import { DialogOption, Difficulty, Hud, JobLine, ScheduleCell, ScheduleData } from './hud';
 import { Npc, leaveLot, mowPlan, routeTo } from './npc';
 import { Sfx } from './sfx';
 import { Rain, WEATHER, Weather, rollWeather } from './weather';
@@ -65,6 +65,9 @@ interface SaveFile {
   v: 4; money: number; rep: number; day: number; fuel: number; up: Record<UpKey, number>;
   crew: number; streets: number; forecast: Weather[]; week: Record<string, 'done' | 'missed'>;
   hedges: number[];
+  /** Persistent loose clippings scattered around the yards. */
+  clippings?: ClippingSave[];
+  difficulty?: Difficulty;
   /** fuel left in the spare can (fraction of a full tank), and whether the blades are engaged. */
   can: number;
   /** The rig's parking spot, what's strapped to the trailer, and the tool in hand. */
@@ -74,7 +77,7 @@ interface SaveFile {
   toolFuel: number;
   /** True once the opening tutorial has been finished (or skipped). */
   tutDone: boolean;
-  lots: Pick<LotState, 'status' | 'grumpy' | 'pay' | 'days' | 'services' | 'strikes' | 'good' | 'rivalDays' | 'level' | 'overgrown'>[];
+  lots: (Pick<LotState, 'status' | 'grumpy' | 'pay' | 'days' | 'services' | 'strikes' | 'good' | 'rivalDays' | 'level' | 'overgrown'> & { cutCells?: number[] })[];
 }
 const SAVE_KEY = 'li_save_v4';
 const RIVAL = 'Green Giant Lawns';
@@ -106,7 +109,7 @@ const TUTORIAL_STEPS: { icon: string; title: string; body: string; keys: string;
   },
   {
     icon: '🧰', title: 'The trailer has the gear',
-    body: 'Walk to the trailer and press <b>T</b> to take a weed eater, hedge trimmer or leaf blower. Stand near the work and <b>hold F</b> to run it — the bar at the bottom of the screen tells you when there is something in reach.',
+    body: 'Walk to the trailer and press <b>T</b> to take a weed eater, hedge trimmer, leaf blower or rake. Stand near the work and <b>hold F</b> to run it — blow away leaves and clippings, or rake up mower piles.',
     keys: 'T takes a tool · hold F to use it', done: 'tool',
   },
   {
@@ -116,7 +119,7 @@ const TUTORIAL_STEPS: { icon: string; title: string; body: string; keys: string;
   },
   {
     icon: '⛽', title: 'Never get stranded',
-    body: 'There is a spare can of fuel on the truck. If you do run dry, press <b>G</b> to pour it in — and if the can is empty too, an arrow appears pointing you to the nearest pump.',
+    body: 'Spare fuel is secured on the trailer. If you run low, press <b>G</b> to use it — and if it runs empty too, an arrow points you to the nearest pump.',
     keys: 'G pours the can · C for the schedule',
   },
 ];
@@ -132,6 +135,7 @@ export class Game {
   grass: Grass;
   flowers: Flowers;
   leaves: Leaves;
+  clippings: Clippings;
   model: MowerModel;
   mover = new Mover({ radius: 0.8, maxSpeed: 5.4, accel: 10, decel: 7, turnRate: 10 });
   squash = new Squash({ stiffness: 150, damping: 10 });
@@ -195,8 +199,6 @@ export class Game {
   private tutT = 0;
   /** Where the mower is parked, so you can climb back on. */
   mowerPark = { x: 0, z: 0, yaw: 0 };
-  /** The spare can's model, carried or left by the mower. */
-  canModel: THREE.Group;
   /** Fuel left in the spare can, in the same units as the tank. */
   canFuel = 0;
   /** > 0 while pouring the can into the tank. */
@@ -208,6 +210,8 @@ export class Game {
   private bladeHinted = false;
   private walkT = 0;
   private deckT = 0;
+  private clippingT = 0;
+  private difficulty: Difficulty = 'easy';
   private puffT = 0;
   private cloudT = 0;
   private clouds: THREE.Sprite[] = [];
@@ -277,9 +281,10 @@ export class Game {
     this.clouds = this.world.clouds;
     if (this.engine.isTouch) this.world.sun.shadow.mapSize.set(1024, 1024);
     this.engine.scene = this.world.scene;
-    this.grass = new Grass(this.world, this.engine.isTouch ? 1 : 2);
+    this.grass = new Grass(this.world, this.engine.isTouch ? 3 : 5);
     this.flowers = new Flowers(this.world);
     this.leaves = new Leaves(this.world);
+    this.clippings = new Clippings(this.world);
     this.clips = this.engine.addParticles(1200, false);
     this.sparks = this.engine.addParticles(700, true);
     this.smoke = this.engine.addParticles(400, false);
@@ -289,9 +294,6 @@ export class Game {
     this.walker = buildWalker();
     this.walker.root.visible = false;
     this.world.scene.add(this.walker.root);
-    this.canModel = buildFuelCan();
-    this.canModel.visible = false;
-    this.world.scene.add(this.canModel);
     this.truck = buildTruck();
     this.trailerModel = buildTrailer();
     // the three hand tools hang on the trailer's rack until you take one
@@ -371,7 +373,9 @@ export class Game {
     this.phase = 'title';
     this.hud.setPlaying(false);
     this.sfx.rain(0);
-    this.hud.title(!!this.readSave(), () => this.newGame(), () => this.continueGame());
+    const saved = this.readSave();
+    this.difficulty = saved?.difficulty ?? 'easy';
+    this.hud.title(!!saved, () => this.newGame(), () => this.continueGame(), this.difficulty, (value) => { this.difficulty = value; });
   }
 
   private newGame() {
@@ -382,6 +386,7 @@ export class Game {
     this.toolFuel = this.toolFuelMax;
     this.blades = true;
     this.lots = this.freshLots();
+    this.clippings.clearAll();
     this.week = {};
     this.forecast = ['sunny', rollWeather('sunny'), rollWeather(null), rollWeather(null)];
     this.yesterday = 'sunny';
@@ -416,6 +421,15 @@ export class Game {
     this.canFuel = s.can === undefined ? this.fuelMax * CAN_FRACTION : s.can * this.fuelMax;
     const freshLots = this.freshLots();
     this.lots = this.world.lots.map((_, i) => ({ ...freshLots[i], ...(s.lots[i] ?? {}) }));
+    s.lots.forEach((saved, i) => {
+      if (this.difficulty !== 'easy' || saved.status !== 'job') return;
+      for (const c of saved.cutCells ?? []) {
+        const kind = this.grass.cutCell(c, (Math.floor(cellX(c)) & 1) === 0);
+        if (kind === 'lawn') this.lots[i].cut++;
+        else if (kind === 'edge') this.lots[i].edgeCut++;
+      }
+    });
+    this.clippings.restore(s.clippings ?? []);
     this.forecast = [...s.forecast, 'sunny', 'cloudy', 'sunny', 'sunny'].slice(0, 4) as Weather[];
     this.week = s.week ?? {};
     this.world.hedges.forEach((h, i) => { h.regrow = s.hedges[i] ?? 0; h.shaggy = h.regrow <= 0; });
@@ -445,7 +459,10 @@ export class Game {
   private startDay() {
     if (this.weekday === 0) this.week = {};
     this.hour = DAY_START;
-    for (const lot of this.world.lots) this.grass.growLot(lot, this.lots[lot.id].level);
+    for (const lot of this.world.lots) {
+      const st = this.lots[lot.id];
+      if (!(this.difficulty === 'easy' && st.status === 'job')) this.grass.growLot(lot, st.level);
+    }
     this.flowers.restoreAll();
     const windy = this.yesterday === 'windy';
     this.leaves.scatter(this.world, (lot) => {
@@ -456,8 +473,11 @@ export class Game {
     this.resetGnomes();
     let booked = 0;
     this.lots.forEach((st) => {
-      if (st.status === 'declined' || st.status === 'job') st.status = 'prospect';
-      st.doneToday = false; st.flowers = 0; st.gnome = false; st.cut = 0; st.edgeCut = 0; st.offer = null; st.crew = -1; st.tries = 0; st.asked = 0; st.sweetened = false;
+      const continuingEasyTrial = this.difficulty === 'easy' && st.status === 'job';
+      if (st.status === 'declined' || (st.status === 'job' && !continuingEasyTrial)) st.status = 'prospect';
+      st.doneToday = false; st.flowers = 0; st.gnome = false;
+      if (!continuingEasyTrial) { st.cut = 0; st.edgeCut = 0; st.offer = null; }
+      st.crew = -1; st.tries = 0; st.asked = 0; st.sweetened = false;
       st.deadline = DAY_END;
       if (this.isDue(st)) booked++;
     });
@@ -503,7 +523,7 @@ export class Game {
     const wd = this.weekday;
     // missed bookings are strikes
     this.lots.forEach((st, i) => {
-      if (st.status !== 'client' || !st.days.includes(wd) || st.doneToday) return;
+      if (this.difficulty === 'easy' || st.status !== 'client' || !st.days.includes(wd) || st.doneToday) return;
       const lot = this.world.lots[i];
       st.strikes++;
       st.good = 0;
@@ -866,9 +886,6 @@ export class Game {
     TOOLS.forEach((t, i) => { const g = this.rackTools[i]; if (g) g.visible = this.tool !== t.id; });
     const tfwd = this.trailer.vx * Math.sin(this.trailer.yaw) + this.trailer.vz * Math.cos(this.trailer.yaw);
     for (const w of this.trailerModel.wheels) w.rotation.x += (tfwd * dt) / 0.34;
-    // the spare cans in the bed empty as they're used
-    const full = this.canFuel / Math.max(1, this.fuelMax);
-    this.truck.cans.forEach((c, i) => { c.visible = full > i * 0.35; });
   }
 
   /** Pose the rig with no dt, for parking on load. */
@@ -975,10 +992,14 @@ export class Game {
       tutDone: this.tutorialDone,
       crew: this.crew.length, streets: this.world.streets.filter((x) => x.unlocked).length,
       forecast: this.forecast, week: this.week, hedges: this.world.hedges.map((h) => (h.shaggy ? 0 : h.regrow)),
+      clippings: this.clippings.save(), difficulty: this.difficulty,
       can: this.canFuel / Math.max(1, this.fuelMax),
-      lots: this.lots.map((l) => ({
-        status: l.status === 'job' || l.status === 'declined' ? 'prospect' : l.status,
+      lots: this.lots.map((l, i) => ({
+        status: (l.status === 'job' && this.difficulty !== 'easy') || l.status === 'declined' ? 'prospect' : l.status,
         grumpy: l.grumpy, pay: l.pay, days: l.days, services: l.services, strikes: l.strikes, good: l.good, rivalDays: l.rivalDays, level: l.level, overgrown: l.overgrown,
+        cutCells: this.difficulty === 'easy' && l.status === 'job'
+          ? [...this.world.lots[i].lawnCells, ...this.world.lots[i].edgeCells].filter((c) => this.grass.isCut(c))
+          : undefined,
       })),
     };
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(s)); } catch { /* storage blocked */ }
@@ -1084,13 +1105,8 @@ export class Game {
     this.updateLighting();
     this.updateSky(dt);
     this.leaves.update(dt, t, this.wx.wind, this.onLeafLand);
+    this.clippings.update(dt);
     if (this.phase === 'play') this.refillCanAtPump(dt);
-    this.canModel.visible = this.canFuel > 0.02;
-    if (this.canModel.visible) {
-      if (this.mounted === 'mower') { this.canModel.position.set(this.mover.x + 0.62, 0.72, this.mover.z - 0.4); this.canModel.rotation.y = this.mover.yaw; }
-      else if (this.mounted === 'rig') { this.canModel.visible = false; }
-      else { this.canModel.position.set(this.feet.x - 0.24, 0.35, this.feet.z); this.canModel.rotation.y = this.feet.yaw + Math.PI; }
-    }
     this.updateFuelArrow(dt, t);
     this.clips.update(dt, this.mover.x, 0.4, this.mover.z);
     this.sparks.update(dt, this.mover.x, 0.4, this.mover.z);
@@ -1152,7 +1168,9 @@ export class Game {
     const left = this.touchDriveKeys.has('left'), right = this.touchDriveKeys.has('right');
     const forward = this.touchDriveKeys.has('forward'), reverse = this.touchDriveKeys.has('reverse');
     const throttle = forward || reverse ? Number(forward) - Number(reverse) : clamp(-raw.z, -1, 1);
-    const steer = left || right ? Number(right) - Number(left) : clamp(raw.x, -1, 1);
+    // With the mower/truck facing +Z, +X is screen-left from the chase-camera view,
+    // so invert horizontal input to make left/right steering match the displayed controls.
+    const steer = left || right ? Number(left) - Number(right) : -clamp(raw.x, -1, 1);
     return { ...raw, throttle, steer, m: Math.max(raw.m, Math.abs(throttle), Math.abs(steer)) };
   }
 
@@ -1183,9 +1201,13 @@ export class Game {
     const dry = this.mounted !== null && this.fuel <= 0;
     // the mower is a zero-turn (it spins in place with no throttle); the truck is not
     const hit = this.mounted !== null && drv
-      ? m.updateCar(dt, dry ? 0 : drv.throttle, dry ? 0 : drv.steer, this.world, this.boost ? 1.35 : 1, this.mounted === 'mower' ? 2.4 : 0)
+      ? m.updateCar(
+        dt, dry ? 0 : drv.throttle, dry ? 0 : drv.steer, this.world,
+        this.boost ? 1.35 : 1, this.mounted === 'mower' ? 2.4 : 0, this.mounted === 'mower' ? 9 : 5.5,
+      )
       : m.update(dt, dry || !inp ? 0 : inp.x, dry || !inp ? 0 : inp.z, dry || !inp ? 0 : inp.m, this.world, this.boost ? 1.35 : 1);
     if (this.mounted !== null && m.speed > 0.1) this.grass.press(m.x, m.z, m.vx, m.vz, this.mounted === 'rig' ? 1.7 : 1.2);
+    if (this.mounted === 'mower' && m.speed > 0.1) this.clippings.mowerPass(m.x, m.z, m.yaw, m.speed, 1.1);
     this.bumpCd -= dt;
     if (hit.impact > 2.4 && this.bumpCd <= 0) this.bump(hit.impact, hit.nx, hit.nz);
     const maxSp = this.mounted === 'rig' ? RIG_SPEED : this.mounted === 'mower' ? this.speedMax : this.feet.o.maxSpeed;
@@ -1517,9 +1539,9 @@ export class Game {
       const has = this.tool === t.id;
       return `<div class="tool-row${has ? ' on' : ''}"><span>${t.icon}</span><b>${t.name}</b><small>${t.desc}</small>${has ? '<em>in hand</em>' : ''}</div>`;
     }).join('');
-    const body = `<b>Equipment trailer</b> — take one hand tool and carry it while you walk. Tools run off their own little tank, not the mower's.` +
+    const body = `<b>Equipment trailer</b> — take one hand tool and carry it while you walk. Powered tools use their own tank; the rake is manual.` +
       `<div class="tools">${rows}</div>` +
-      `<div class="fuel-note">⛽ Tool tank: ${Math.ceil((this.toolFuel / this.toolFuelMax) * 100)}% · refills when you're at the trailer.</div>`;
+      `<div class="fuel-note">⛽ Powered-tool tank: ${Math.ceil((this.toolFuel / this.toolFuelMax) * 100)}% · refills when you're at the trailer.</div>`;
     this.hud.dialog('🧰 Trailer', body, opts);
     this.phase = 'dialog';
     this.sfx.unlock();
@@ -1527,7 +1549,7 @@ export class Game {
 
   /** Standing by the trailer tops the little tank up, so a swap never leaves you dry. */
   private toolTankTopUp(dt: number) {
-    if (this.toolFuel >= this.toolFuelMax) return;
+    if (this.tool === 'rake' || this.toolFuel >= this.toolFuelMax) return;
     const near = Math.hypot(this.feet.x - this.trailer.x, this.feet.z - this.trailer.z);
     if (near > 7) return;
     this.toolFuel = Math.min(this.toolFuelMax, this.toolFuel + (this.toolFuelMax / 8) * dt);
@@ -1596,7 +1618,7 @@ export class Game {
       return;
     }
     const have = this.toolTarget(this.tool, f.x, f.z);
-    const low = this.toolFuel <= 1;
+    const low = this.tool !== 'rake' && this.toolFuel <= 1;
     if (low) this.hud.prompt('🛢️ This tool is out of fuel — top it up at the trailer', 'warn');
     else if (!have) this.hud.prompt(`${toolDef(this.tool).icon} ${toolDef(this.tool).name} · nothing in reach here`, 'warn');
     else this.hud.prompt(`${toolDef(this.tool).icon} Hold <kbd>F</kbd> to run the ${toolDef(this.tool).name.toLowerCase()}`, 'ok');
@@ -1617,7 +1639,7 @@ export class Game {
 
   /** The nearest thing a tool can work on, or null. Reach is a bit generous so it isn't fiddly. */
   private toolTarget(t: ToolId, x: number, z: number) {
-    const R = toolDef(t).reach + 1.6;
+    const R = toolDef(t).reach + (t === 'rake' ? 0.55 : 1.6);
     let best: { x: number; z: number } | null = null, bd = Infinity;
     if (t === 'trimmer') {
       for (const h of this.world.hedges) {
@@ -1633,6 +1655,13 @@ export class Game {
         const d = Math.hypot(l.x - x, l.z - z);
         if (d < R && d < bd) { bd = d; best = { x: l.x, z: l.z }; }
       }
+      const clipping = this.clippings.nearest(x, z, R);
+      if (clipping) {
+        const d = Math.hypot(clipping.x - x, clipping.z - z);
+        if (d < bd) best = clipping;
+      }
+    } else if (t === 'rake') {
+      best = this.clippings.nearest(x, z, R);
     } else {
       // Weed eater: the nearest uncut edging cell or tall overgrowth patch.
       const g0x = Math.floor((x - R - MIN_X) / CELL), g1x = Math.floor((x + R - MIN_X) / CELL);
@@ -1651,11 +1680,12 @@ export class Game {
   /** Hold a tool toward what you're working on; it does its one job in reach. */
   private useTool(dt: number) {
     const t = this.tool;
-    if (!t || this.toolFuel <= 0) { this.toolActive = false; return; }
+    const fuelled = t !== 'rake';
+    if (!t || (fuelled && this.toolFuel <= 0)) { this.toolActive = false; return; }
     const def = toolDef(t);
     this.tutorialFire('tool');
     const f = this.feet;
-    this.toolFuel = Math.max(0, this.toolFuel - TOOL_BURN * dt);
+    if (fuelled) this.toolFuel = Math.max(0, this.toolFuel - TOOL_BURN * dt);
     this.toolActive = true;
     if (def.action === 'leaves') {
       // A blower moves leaves out of reach for good: sweep anything under the nozzle off the world,
@@ -1676,8 +1706,18 @@ export class Game {
         if (gone <= 3) this.clips.spawn(l.x, 0.2, l.z, Math.sin(f.yaw) * 7, 2.2, Math.cos(f.yaw) * 7, 0.85, 0.45, 0.15, 0.12, 0.5, 0, 30);
       }
       const n = this.leaves.gust(nx, nz, def.reach * 1.3, 1.6, 2.6);
+      const clippingsGone = this.clippings.blow(f.x, f.z, fx, fz, def.reach * 1.5, def.reach * 0.9);
       if (gone > 0) this.blownToday += gone;
-      if ((gone > 0 || n > 0) && Math.random() < 0.4) this.sfx.leaf();
+      if ((gone > 0 || n > 0 || clippingsGone > 0) && Math.random() < 0.4) this.sfx.leaf();
+      return;
+    }
+    if (def.action === 'clippings') {
+      const fx = Math.sin(f.yaw), fz = Math.cos(f.yaw);
+      const gathered = this.clippings.rake(f.x + fx * 0.55, f.z + fz * 0.55, def.reach * 0.72);
+      if (gathered > 0) {
+        this.toolT -= dt;
+        if (this.toolT <= 0) { this.toolT = 0.22; this.sfx.leaf(); }
+      }
       return;
     }
     if (def.action === 'hedge') {
@@ -1725,7 +1765,7 @@ export class Game {
     const tm = this.toolModel;
     if (!tm) return;
     tm.root.visible = true;
-    const on = this.toolActive && this.toolFuel > 0;
+    const on = this.toolActive && (this.tool === 'rake' || this.toolFuel > 0);
     // the arm carries the tool: raised and steady when it runs, hanging low when it's off
     const arm = this.walker.armR;
     arm.rotation.x = -0.9 + (on ? 0 : 0.25);
@@ -1742,7 +1782,7 @@ export class Game {
       }
     }
     // an empty tank sputters instead of spinning: tell the player why nothing is happening
-    if (this.toolActive && !on && this.toolFuel <= 0) {
+    if (this.toolActive && this.tool !== 'rake' && !on && this.toolFuel <= 0) {
       this.toolT -= dt;
       if (this.toolT <= 0) {
         this.toolT = 1.6;
@@ -1762,6 +1802,11 @@ export class Game {
         const f = this.feet;
         this.clips.spawn(f.x + Math.sin(f.yaw) * 1.1, 0.3, f.z + Math.cos(f.yaw) * 1.1, Math.sin(f.yaw) * 3, 1.1, Math.cos(f.yaw) * 3, 0.7, 0.62, 0.4, 0.24, 0.4, 9);
       }
+    } else if (this.tool === 'rake') {
+      tm.root.position.set(-0.08, -0.68, 0.08);
+      tm.root.rotation.x = -0.12;
+      tm.root.rotation.y = -0.18;
+      if (on) tm.run.rotation.x = Math.sin(t * 7) * 0.16;
     } else if (this.tool === 'weedeater') {
       // The head has to sit on the grass. The shoulder is 1.3 m up but the arm hangs short of that
       // in model space, so the tool is dropped most of the way down the arm and tipped hard forward;
@@ -1823,7 +1868,7 @@ export class Game {
   // ---------------------------------------------------------------- mowing
   /** Cut lawn and edge cells within `R` of (cx, cz); only lot `only` if given. Returns the count. */
   private cutDisc(cx: number, cz: number, R: number, light: boolean, only = -1) {
-    let n = 0;
+    let n = 0, heightTotal = 0;
     const g0x = Math.floor((cx - R - MIN_X) / CELL), g1x = Math.floor((cx + R - MIN_X) / CELL);
     const g0z = Math.floor((cz - R - MIN_Z) / CELL), g1z = Math.floor((cz + R - MIN_Z) / CELL);
     for (let gz = Math.max(0, g0z); gz <= Math.min(GH - 1, g1z); gz++) for (let gx = Math.max(0, g0x); gx <= Math.min(GW - 1, g1x); gx++) {
@@ -1833,10 +1878,12 @@ export class Game {
       if (this.needsWeedeater(owner) && this.world.kind[c] === K_LAWN) continue;
       if (this.world.kind[c] !== K_LAWN && !this.world.edge[c]) continue;
       if (Math.hypot(cellX(c) - cx, cellZ(c) - cz) > R) continue;
+      const height = this.grass.heightAt(c);
       const k = this.grass.cutCell(c, light);
-      if (k === 'lawn') { this.lots[owner].cut++; n++; } else if (k === 'edge') { this.lots[owner].edgeCut++; n++; }
+      if (k === 'lawn') { this.lots[owner].cut++; n++; heightTotal += height; }
+      else if (k === 'edge') { this.lots[owner].edgeCut++; n++; heightTotal += height; }
     }
-    return n;
+    return { count: n, heightTotal };
   }
 
   /** The spinning deck throws nearby leaves into the air; they tumble and land somewhere new. */
@@ -1854,10 +1901,22 @@ export class Game {
     const m = this.mover;
     const fx = Math.sin(m.yaw), fz = Math.cos(m.yaw);
     const light = Math.abs(m.vx) > Math.abs(m.vz) ? m.vx > 0 : m.vz < 0;
-    const n = this.cutDisc(m.x + fx * 0.15, m.z + fz * 0.15, this.deckR, light);
+    const cut = this.cutDisc(m.x + fx * 0.15, m.z + fz * 0.15, this.deckR, light);
+    const n = cut.count;
+    this.clippingT = Math.max(0, this.clippingT - dt);
     if (n > 0) {
       const rx = Math.cos(m.yaw), rz = -Math.sin(m.yaw);
       const ox = m.x + rx * 1.15 + fx * 0.15, oz = m.z + rz * 1.15 + fz * 0.15;
+      if (this.clippingT <= 0) {
+        const cell = this.cellAt(m.x + fx * 0.4, m.z + fz * 0.4);
+        const owner = cell >= 0 ? this.world.owner[cell] : -1;
+        const averageHeight = cut.heightTotal / n;
+        const basePieces = Math.min(6, Math.max(3, Math.ceil(n / 3)));
+        const heightMultiplier = clamp(averageHeight / 0.7, 0.5, 2.2);
+        const pieces = Math.min(12, Math.max(1, Math.round(basePieces * heightMultiplier)));
+        this.clippings.eject(owner, ox, oz, rx * (1.5 + m.speed * 0.18) + fx * 0.25, rz * (1.5 + m.speed * 0.18) + fz * 0.25, pieces);
+        this.clippingT = 0.12;
+      }
       for (let k = 0; k < Math.min(6, n * 2); k++) {
         const s = 3 + Math.random() * 3.5, sh = 0.75 + Math.random() * 0.4;
         this.clips.spawn(ox, 0.3, oz, rx * s + m.vx * 0.5 + (Math.random() - 0.5) * 1.5, 1.5 + Math.random() * 2, rz * s + m.vz * 0.5 + (Math.random() - 0.5) * 1.5,
@@ -1960,7 +2019,13 @@ export class Game {
     if (lot < 0) return;
     const m = npc.mover;
     const light = Math.abs(m.vx) > Math.abs(m.vz) ? m.vx > 0 : m.vz < 0;
-    const n = this.cutDisc(m.x + Math.sin(m.yaw) * 0.15, m.z + Math.cos(m.yaw) * 0.15, 0.95, light, lot);
+    const fx = Math.sin(m.yaw), fz = Math.cos(m.yaw), rx = Math.cos(m.yaw), rz = -Math.sin(m.yaw);
+    const cut = this.cutDisc(m.x + fx * 0.15, m.z + fz * 0.15, 0.95, light, lot);
+    const n = cut.count;
+    if (n > 0 && Math.random() < 0.16) {
+      const pieces = clamp(Math.round((cut.heightTotal / n) * 1.5), 1, 4);
+      this.clippings.eject(lot, m.x + rx * 1.05, m.z + rz * 1.05, rx * 1.7 + fx * 0.2, rz * 1.7 + fz * 0.2, pieces);
+    }
     if (n > 0 && Math.random() < 0.5) {
       const rx = Math.cos(m.yaw), rz = -Math.sin(m.yaw);
       this.clips.spawn(m.x + rx * 1.1, 0.3, m.z + rz * 1.1, rx * 4, 2, rz * 4, 0.33, 0.58, 0.2, 0.08, 0.8, 9);
@@ -2101,7 +2166,7 @@ export class Game {
     if (f < 0.2 && !this.fuelWarned) {
       this.fuelWarned = true;
       this.sfx.deny();
-      if (this.canFuel > 0.5) this.hud.toast('⛽ Low on gas! Park up and press G to pour the spare can in, or head to a pump.', 'bad', 4200);
+      if (this.canFuel > 0.5) this.hud.toast('⛽ Low on gas! Park up and press G to use the spare fuel on your trailer, or head to a pump.', 'bad', 4200);
       else this.hud.toast('⛽ Low on gas! Head to a pump (west end of each street)', 'bad');
     }
     if (f > 0.5) this.fuelWarned = false;
@@ -2140,7 +2205,7 @@ export class Game {
       Math.hypot(this.feet.x - this.mowerPark.x, this.feet.z - this.mowerPark.z) <= 2.4 ||
       (this.mowerLoaded ? Math.hypot(this.feet.x - this.rigMover.x, this.feet.z - this.rigMover.z) : Infinity) <= 3.2;
     if (!near) {
-      this.hud.toast('Walk back to your mower or the truck to pour the can into it.', 'info', 2200);
+      this.hud.toast('Walk back to your mower or trailer to use the spare fuel.', 'info', 2200);
       return;
     }
     this.pouring = CAN_POUR_TIME;
@@ -2283,7 +2348,7 @@ export class Game {
       (again ? '<br><i>"You again? Fine — what is it?"</i>' : '') +
       (sample ? '<br>"Oh! Did you already do half my lawn?"' : '') +
       `<div class="offer"><div><b>📅 ${offer.days.length}× a week:</b> ${load}</div><div><b>Each visit:</b> ${svc}</div>` +
-      `<div><b>Trial visit:</b> today, done by ${fmtHour(due)}</div>` +
+      `<div><b>Trial visit:</b> ${this.difficulty === 'easy' ? 'no deadline — take the time you need' : `today, done by ${fmtHour(due)}`}</div>` +
       (again ? '<div class="haggle">They are already fed up. Haggle too often and they will show you the door.</div>' : '') + '</div>';
     const opts: DialogOption[] = [];
     const base = this.odds(st, true);
@@ -2402,9 +2467,11 @@ export class Game {
   }
 
   private dueTime(lot: Lot, sv: Services) {
+    if (this.difficulty === 'easy') return DAY_END;
     const area = lot.lawnCells.length * CELL * CELL;
     const extra = (sv.sweep ? 0.3 : 0) + (sv.edge ? 0.4 : 0) + (sv.hedge ? 0.4 : 0);
-    return Math.min(DAY_END, Math.ceil((this.hour + 2 + area / 250 + extra) * 2) / 2);
+    const hours = this.difficulty === 'hard' ? 1.25 + area / 360 + extra : 2 + area / 250 + extra;
+    return Math.min(DAY_END, Math.ceil((this.hour + hours) * 2) / 2);
   }
 
   private pitch(lot: Lot, offer: Offer, price: number, chance: number, due: number) {
@@ -2437,13 +2504,17 @@ export class Game {
     this.engine.resetClock();
   }
 
+  private clippingThreshold(lot: Lot) { return Math.max(Clippings.CLEANUP_MIN, Math.floor(lot.lawnCells.length * 0.08)); }
+
   private remaining(lot: Lot) {
     const st = this.lots[lot.id];
+    const clippings = this.clippings.left(lot.id);
     return {
       lawn: st.cut / lot.lawnCells.length,
       leaves: st.services.sweep ? this.leaves.left(lot.id) : null,
       edge: st.services.edge ? (lot.edgeCells.length ? st.edgeCut / lot.edgeCells.length : 1) : null,
       hedges: st.services.hedge ? lot.hedges.filter((h) => h.shaggy).length : null,
+      clippings: clippings >= this.clippingThreshold(lot) ? clippings : null,
     };
   }
 
@@ -2451,7 +2522,7 @@ export class Game {
     this.world.lots.forEach((lot, i) => {
       const st = this.lots[i];
       if (!this.isActive(st)) return;
-      if (st.status === 'job' && this.hour > st.deadline) {
+      if (this.difficulty !== 'easy' && st.status === 'job' && this.hour > st.deadline) {
         st.status = 'declined';
         st.grumpy = Math.min(1, st.grumpy + 0.2);
         this.rep = clamp(this.rep - 0.4, 0, 5);
@@ -2462,7 +2533,7 @@ export class Game {
       }
       if (st.crew >= 0) return; // crew are on it
       const r = this.remaining(lot);
-      if (r.lawn >= 0.95 && (r.leaves === null || r.leaves <= 1) && (r.edge === null || r.edge >= 0.9) && (r.hedges === null || r.hedges === 0)) this.completeVisit(lot, -1);
+      if (r.lawn >= 0.95 && (r.leaves === null || r.leaves <= 1) && (r.edge === null || r.edge >= 0.9) && (r.hedges === null || r.hedges === 0) && r.clippings === null) this.completeVisit(lot, -1);
     });
   }
 
@@ -2476,10 +2547,11 @@ export class Game {
       if (r && crew < 0 && k++ % 4 === 0) this.sparks.spawn(cellX(c), 0.2, cellZ(c), 0, 1.5 + Math.random() * 2, 0, 1, 0.9, 0.4, 0.18, 0.8, -0.5);
     }
     if (st.services.sweep || crew >= 0) for (const l of this.leaves.list) if (l.lot === lot.id) l.alive = false;
+    if (crew >= 0) this.clippings.clearLot(lot.id);
     if (st.services.hedge) for (const h of lot.hedges) if (h.shaggy) this.trim(h, false);
     st.crew = -1;
     const byYou = crew < 0;
-    const early = this.hour <= st.deadline - (st.status === 'job' ? 1 : 4);
+    const early = this.difficulty === 'easy' || this.hour <= st.deadline - (st.status === 'job' ? 1 : 4);
     const tip = byYou && early ? Math.round(st.pay * 0.2) : 0;
     const damage = st.flowers * 3 + (st.gnome ? 10 : 0);
     const total = Math.max(0, st.pay + tip - damage);
@@ -2718,18 +2790,33 @@ export class Game {
     for (const lot of this.world.lots) {
       const b = lot.houseBox;
       const hide = playing && m.x > b.minX - 1.5 && m.x < b.maxX + 1.5 && b.maxZ > m.z - 0.5 && b.minZ < m.z + 7;
-      const target = hide ? 0.22 : 1;
+      const target = hide ? 0.14 : 1;
       if (Math.abs(lot.fade - target) < 0.002) continue;
       lot.fade += (target - lot.fade) * k;
-      for (const mat of lot.houseMats) mat.opacity = lot.fade;
+      for (const mat of lot.houseMats) {
+        mat.opacity = lot.fade;
+        mat.depthWrite = lot.fade > 0.97;
+      }
+      if (lot.houseWire) lot.houseWire.opacity = (1 - lot.fade) * 0.95;
     }
+    // Fade only trees that actually intersect the camera-to-player sightline. This avoids the old
+    // proximity-only effect, which could make nearby trees disappear even when they were offscreen.
+    const cam = this.engine.camera.position;
+    const rayX = m.x - cam.x, rayZ = m.z - cam.z;
+    const rayLen2 = rayX * rayX + rayZ * rayZ || 1;
     for (const tr of this.world.trees) {
-      const hide = playing && Math.abs(tr.x - m.x) < 2.8 && tr.z > m.z - 2.5 && tr.z < m.z + 6.5;
-      const target = hide ? 0.25 : 1;
+      const along = ((tr.x - cam.x) * rayX + (tr.z - cam.z) * rayZ) / rayLen2;
+      const cx = cam.x + rayX * along, cz = cam.z + rayZ * along;
+      const lineY = cam.y + (1.05 - cam.y) * along;
+      const intersects = along > 0.02 && along < 0.99 && Math.hypot(tr.x - cx, tr.z - cz) < 2.25 && lineY > 0.08 && lineY < tr.h + 3.2;
+      const target = playing && intersects ? 0.14 : 1;
       if (Math.abs(tr.fade - target) < 0.002) continue;
       tr.fade += (target - tr.fade) * k;
-      tr.mat.opacity = tr.fade;
-      tr.mat.depthWrite = tr.fade > 0.95;
+      for (const mat of tr.mats) {
+        mat.opacity = tr.fade;
+        mat.depthWrite = tr.fade > 0.97;
+      }
+      tr.wire.opacity = (1 - tr.fade) * 0.95;
     }
   }
 
@@ -2758,8 +2845,8 @@ export class Game {
       const r = this.remaining(lot);
       jobs.push({
         label: `#${lot.number} ${cap(lot.owner)}`,
-        lawn: r.lawn, leaves: r.leaves, edge: r.edge, hedges: r.hedges,
-        due: fmtHour(st.deadline),
+        lawn: r.lawn, leaves: r.leaves, edge: r.edge, hedges: r.hedges, clippings: r.clippings,
+        due: st.status === 'job' && this.difficulty === 'easy' ? 'no deadline' : fmtHour(st.deadline),
         here: this.curLot === i,
         trial: st.status === 'job',
         crew: st.crew >= 0 ? this.crew[st.crew]?.name ?? null : null,
@@ -2772,7 +2859,7 @@ export class Game {
       weather: WEATHER[this.today].icon, fuel: this.fuel, fuelMax: this.fuelMax, refueling: this.refueling,
       can: this.canFuel, blades: this.blades, riding: this.riding, jobs,
       mounted: this.mounted, tool: this.tool ? toolDef(this.tool).icon + ' ' + toolDef(this.tool).name : null,
-      toolFuel: this.toolFuel, loading: this.loading, mowerLoaded: this.mowerLoaded,
+      toolFuel: this.tool === 'rake' ? -1 : this.toolFuel / this.toolFuelMax, loading: this.loading, mowerLoaded: this.mowerLoaded,
       stranded: this.fuel / Math.max(1, this.fuelMax) < 0.2 && this.canFuel <= 0.5 && !this.refueling && this.nearestPump().d >= PUMP_R + 1,
     });
   }
