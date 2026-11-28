@@ -1457,9 +1457,11 @@ export class Game {
       this.toolModel = buildTool(id);
       const arm = this.walker.armR;
       arm.add(this.toolModel.root);
-      // out in front of the hand and tilted away from the body, so the model reads at a glance
-      this.toolModel.root.position.set(-0.16, -0.48, 0.22);
-      this.toolModel.root.rotation.set(-0.5, 0.5, 0.18);
+      // out in front of the hand. The per-tool pose in poseTool() angles the working end at the job;
+      // this is just where it hangs off the hand.
+      this.toolModel.root.position.set(-0.1, -0.5, 0.14);
+      this.toolModel.root.rotation.set(0.2, 0.3, 0.1);
+      // poseTool() re-places it below, but keep a sane default in case a frame gets drawn first
       this.sfx.mount();
       if (!quiet) this.hud.toast(`${toolDef(id).icon} ${toolDef(id).name} in hand · ${toolDef(id).desc}`, 'good', 3200);
     } else if (!quiet) this.sfx.dismount();
@@ -1647,7 +1649,11 @@ export class Game {
       }
     }
     if (this.tool === 'blower') {
-      tm.root.rotation.x = -0.55;
+      // the same trap as the weed eater: a negative x rotation tips the nozzle UP. Point it at the
+      // paving, which is where the leaves are.
+      tm.root.rotation.x = 0.55;
+      tm.root.rotation.y = -0.1;
+      tm.root.position.set(-0.08, -0.5, 0.12);
       if (on) tm.run.rotation.z += dt * 40;
       // dust blown out of the nozzle
       if (on && Math.random() < 0.5) {
@@ -1655,14 +1661,23 @@ export class Game {
         this.clips.spawn(f.x + Math.sin(f.yaw) * 1.1, 0.3, f.z + Math.cos(f.yaw) * 1.1, Math.sin(f.yaw) * 3, 1.1, Math.cos(f.yaw) * 3, 0.7, 0.62, 0.4, 0.24, 0.4, 9);
       }
     } else if (this.tool === 'weedeater') {
-      tm.root.rotation.x = -0.25 + Math.sin(t * 3) * 0.03;
-      if (on) { tm.run.rotation.y += dt * 30; tm.root.position.x = Math.sin(t * 60) * 0.01; }
+      // The head has to sit on the grass. The shoulder is 1.3 m up but the arm hangs short of that
+      // in model space, so the tool is dropped most of the way down the arm and tipped hard forward;
+      // this puts the cutting end within a hand's width of the ground (checked in the harness).
+      tm.root.position.set(-0.12, -0.86, -0.06);
+      tm.root.rotation.x = 0.42 + Math.sin(t * 3) * 0.02;
+      tm.root.rotation.y = -0.05;
+      tm.root.rotation.z = 0.05;
+      if (on) { tm.run.rotation.y += dt * 30; tm.root.position.x = -0.1 + Math.sin(t * 60) * 0.01; }
       if (on && Math.random() < 0.3) {
         const f = this.feet;
         this.clips.spawn(f.x + Math.sin(f.yaw) * 0.7, 0.15, f.z + Math.cos(f.yaw) * 0.7, (Math.random() - 0.5) * 2, 1.5, (Math.random() - 0.5) * 2, 0.4, 0.7, 0.3, 0.07, 0.55, 9);
       }
     } else if (this.tool === 'trimmer') {
-      tm.root.rotation.x = -0.1 + Math.sin(t * 8) * 0.02;
+      // a hedge trimmer works at hedge height, held level with the bar ahead of you
+      tm.root.position.set(-0.06, -0.44, 0.16);
+      tm.root.rotation.x = 0.08 + Math.sin(t * 8) * 0.02;
+      tm.root.rotation.y = -0.2;
       if (on) tm.run.rotation.y = Math.sin(t * 40) * 0.12;
     }
   }
