@@ -139,14 +139,14 @@ export class Hud {
   update(d: HudData) {
     this.stats.innerHTML =
       `<div class="money">$${Math.floor(d.money).toLocaleString()}</div>` +
-      `<div class="clock">${d.dayLabel} · ${fmtHour(d.hour)} <span class="wx">${d.weather}</span></div>` +
+      `<div class="clock">${d.dayLabel} · ${fmtHour(d.hour)} <span class="wx" title="Weather">${d.weather}</span></div>` +
       `<div class="rep" title="Reputation">${stars(d.rep)} <span>${d.rep.toFixed(1)}</span></div>`;
     const f = d.fuel / d.fuelMax;
     const cf = d.fuelMax ? d.can / d.fuelMax : 0;
     this.fuelBar.style.width = `${(f * 100).toFixed(1)}%`;
     this.fuelBar.className = `fuel-fill${f < 0.2 ? ' low' : ''}${d.refueling ? ' filling' : ''}`;
     this.fuelText.textContent = d.refueling ? 'Filling…' : `${Math.ceil(f * 100)}%`;
-    this.canEl.innerHTML = `<span class="jerry${cf > 0 ? '' : ' empty'}">🛢️</span>${cf > 0 ? `${Math.ceil(cf * 100)}%` : 'empty'}<span class="k">G</span>`;
+    this.canEl.innerHTML = `<span class="jerry${cf > 0 ? '' : ' empty'}">🛢️</span>spare ${cf > 0 ? `${Math.ceil(cf * 100)}%` : 'empty'}<span class="k">G</span>`;
     const chips: string[] = [];
     if (d.mounted === 'rig') {
       chips.push('<span class="chip-mode rig">🚚 driving the rig</span>');
@@ -163,9 +163,9 @@ export class Hud {
     if (d.stranded) chips.push('<span class="chip-mode warn">⛽ stranded — follow the arrow</span>');
     this.modeEl.innerHTML = chips.join('');
     if (!d.jobs.length) {
-      this.jobs.innerHTML = d.regulars
+      this.jobs.innerHTML = '<div class="jobs-title">Today\'s schedule</div>' + (d.regulars
         ? '<div class="hint">✅ Nothing left on today\'s schedule. Knock on doors marked <b>!</b> to grow the business.</div>'
-        : '<div class="hint">No customers yet: drive up to a front door marked <b>!</b> to knock.</div>';
+        : '<div class="hint">No customers yet: drive up to a front door marked <b>!</b> to knock.</div>');
       return;
     }
     const shown = d.jobs.slice(0, 5);
@@ -180,7 +180,7 @@ export class Hud {
         <div class="job-head"><span>${j.trial ? '<em>trial</em> ' : ''}${j.label}</span><span class="due">${j.crew ? `👷 ${j.crew}` : `due ${j.due}`}</span></div>
         <div class="bars"><div class="bar"><div style="width:${Math.min(100, j.lawn * 100).toFixed(0)}%"></div></div>${chips}</div>
       </div>`;
-    }).join('') + (d.jobs.length > shown.length ? `<div class="more">+${d.jobs.length - shown.length} more (C for schedule)</div>` : '');
+    }).join('') + (d.jobs.length > shown.length ? `<div class="more">+${d.jobs.length - shown.length} more · press C for the week</div>` : '');
   }
 
   toast(text: string, kind: ToastKind = 'info', ms = 2600) {
@@ -220,39 +220,81 @@ export class Hud {
     return true;
   }
 
-  dialog(title: string, body: string, options: DialogOption[]) {
-    const card = h('div', 'card dialog', `<div class="card-title">${title}</div><div class="card-body">${body}</div>`);
+  /** A card that sits low on screen so you can still see the world while you talk. */
+  dialog(title: string, body: string, options: DialogOption[], eyebrow?: string) {
+    const card = h('div', 'card dialog', `<div class="card-title">${title}</div>${eyebrow ? `<div class="eyebrow">${eyebrow}</div>` : ''}<div class="card-body">${body}</div>`);
     card.appendChild(this.buttons(options));
     this.open(card, options, 'bottom');
   }
 
+  // ------------------------------------------------------------------ title
+  /** Splash screen: brand and pitch on the left, the menu on the right. */
   title(hasSave: boolean, onNew: () => void, onContinue: () => void) {
-    const card = h('div', 'card title-card', `
-      <div class="logo">🌱 LANDSCAPING INC.</div>
-      <div class="tag">One mower, three streets. Build the best lawn business in town.</div>
-      <ul class="how">
-        <li>Drive to a front door marked <b>!</b> to knock and pitch your services</li>
-        <li>Each customer books 1–3 cuts a week on set days. <b class="cal">📅</b> Stick to the schedule: missed visits are strikes</li>
-        <li>Some also want leaves cleared 🍂, edges trimmed 📏 or hedges cut ✂️</li>
-        <li>Rain makes grass shoot up; wind brings leaves. Watch out for Green Giant Lawns.</li>
-        <li>Hire crew to mow your regulars, and win more streets as your reputation grows</li>
-        <li><b class="key">E</b> hop off and walk (a parked mower barely drinks fuel) · <b class="key">B</b> blades off · <b class="key">G</b> pour the spare can</li>
-        <li>Back the trailer up and <b class="key">drive the mower up the ramps</b> to take it to another street; <b class="key">T</b> swaps hand tools at the trailer</li>
-        <li>Rung down? Knock again and <b>haggle</b> — cheaper rate, or drop a service they don't need</li>
-      </ul>
-      <div class="controls">WASD / arrows to drive (relative to the camera) · Shift full throttle · E mount/dismount · B blades · F use a tool · L load the mower · T trailer · G spare can · middle-drag to orbit, R to snap behind · C schedule · Esc pause · M mute</div>`);
+    const screen = h('div', 'title-screen', `
+      <div class="title-hero">
+        <div class="brand">
+          <div class="brand-mark">🌱</div>
+          <div class="brand-text">
+            <div class="brand-name">Landscaping <em>Inc.</em></div>
+            <div class="brand-sub">Lawn care · Route work · Small business</div>
+          </div>
+        </div>
+        <p class="tagline">One mower, a trailer of hand tools and a town that needs cutting. Knock on doors, build a route and turn a borrowed mower into the best lawn business on the block.</p>
+        <div class="feature-row">
+          <span class="feature"><span>🚜</span> Mow &amp; trim</span>
+          <span class="feature"><span>📅</span> Keep the schedule</span>
+          <span class="feature"><span>👷</span> Hire a crew</span>
+          <span class="feature"><span>🛣️</span> Open new streets</span>
+        </div>
+        <ul class="brief">
+          <li><b>Knock</b> on doors marked <b class="bang">!</b> and pitch your price.</li>
+          <li>Customers book <b>1–3 cuts a week</b> — miss a visit and it's a strike.</li>
+          <li>Upsell leaves 🍂, edges 📏 and hedges ✂️ for a bigger ticket.</li>
+          <li>Rain grows grass, wind brings leaves, and <b>Green Giant Lawns</b> wants your streets.</li>
+        </ul>
+      </div>
+      <div class="title-menu">
+        <div class="menu-card">
+          <div class="menu-eyebrow">${hasSave ? 'Welcome back' : 'New business'}</div>
+          ${hasSave ? '' : '<div class="menu-headline">Ready to mow?</div>'}
+          <button class="menu-btn primary" data-act="go">
+            <span class="mb-icon">${hasSave ? '▶' : '🌱'}</span>
+            <span class="mb-text">
+              <span class="mb-title">${hasSave ? 'Continue' : 'Start mowing'}</span>
+              <span class="mb-sub">${hasSave ? 'Pick up where you left off' : 'Day one · one mower · $30'}</span>
+            </span>
+            <span class="k mb-key">⏎</span>
+          </button>
+          ${hasSave ? `<button class="menu-btn" data-act="new">
+            <span class="mb-icon">✚</span>
+            <span class="mb-text"><span class="mb-title">New business</span><span class="mb-sub">Start over from day one</span></span>
+            <span class="k mb-key">N</span>
+          </button>` : ''}
+          <button class="menu-btn" data-act="help">
+            <span class="mb-icon">🎮</span>
+            <span class="mb-text"><span class="mb-title">How to play</span><span class="mb-sub">Every control, one screen</span></span>
+            <span class="k mb-key">H</span>
+          </button>
+          <div class="menu-foot">
+            <kbd>WASD</kbd> drive · <kbd>E</kbd> get on/off · <kbd>T</kbd> trailer · <kbd>C</kbd> schedule · <kbd>Esc</kbd> pause
+            <br>Mouse wheel zooms · middle-drag orbits the camera
+          </div>
+        </div>
+      </div>`);
+    screen.querySelector<HTMLButtonElement>('[data-act="go"]')!.onclick = hasSave ? onContinue : onNew;
+    const nw = screen.querySelector<HTMLButtonElement>('[data-act="new"]');
+    if (nw) nw.onclick = onNew;
+    screen.querySelector<HTMLButtonElement>('[data-act="help"]')!.onclick =
+      () => this.controls(() => this.title(hasSave, onNew, onContinue));
     const opts: DialogOption[] = [];
     if (hasSave) opts.push({ label: 'Continue', key: '⏎', primary: true, onPick: onContinue });
     opts.push({ label: hasSave ? 'New business' : 'Start mowing', key: hasSave ? 'N' : '⏎', primary: !hasSave, onPick: onNew });
-    card.appendChild(this.buttons(opts));
-    this.open(card, opts, 'center');
+    opts.push({ label: 'How to play', key: 'H', onPick: () => this.controls(() => this.title(hasSave, onNew, onContinue)) });
+    this.open(screen, opts, 'title');
   }
 
-  /**
-   * The new-game guided tour: a small card in the corner that does not stop you playing. It moves on
-   * when you do the thing it asks, when you hit Next, or on its own after a while.
-   */
-  /** The full controls sheet, openable from the pause menu (and after skipping the tour). */
+  // --------------------------------------------------------------- controls
+  /** The full controls sheet, openable from the pause menu, the title (and after skipping the tour). */
   controls(onClose: () => void) {
     const rows: [string, string][] = [
       ['WASD / arrows', 'Drive, or walk on foot'],
@@ -269,12 +311,20 @@ export class Hud {
       ['H', 'Replay the tutorial'],
       ['Esc', 'Pause · M mutes'],
     ];
-    const card = h('div', 'card', `<div class="card-title">🎮 Controls</div><div class="keylist">${rows.map(([k, v]) => `<div><b>${k}</b><span>${v}</span></div>`).join('')}</div>`);
+    const card = h('div', 'card', `
+      <div class="card-title">🎮 Controls</div>
+      <div class="card-sub">Everything is on the keyboard — nothing is hidden in a menu.</div>
+      <div class="keylist">${rows.map(([k, v]) => `<div><b>${k}</b><span>${v}</span></div>`).join('')}</div>`);
     const opts: DialogOption[] = [{ label: 'Back', key: 'Esc', primary: true, onPick: onClose }];
     card.appendChild(this.buttons(opts));
     this.open(card, opts, 'center');
   }
 
+  // --------------------------------------------------------------- tutorial
+  /**
+   * The new-game guided tour: a small card in the corner that does not stop you playing. It moves on
+   * when you do the thing it asks, when you hit Next, or on its own after a while.
+   */
   tutorial(d: { step: number; total: number; icon: string; title: string; body: string; keys: string; onNext: () => void; onSkip: () => void }) {
     if (!this.tutorialEl) {
       this.tutorialEl = h('div', 'tutorial-card');
@@ -284,14 +334,14 @@ export class Hud {
     const el = this.tutorialEl;
     el.className = 'tutorial-card on';
     el.innerHTML = `
-      <div class="steps">${dots}<span class="step-n">${d.step + 1} / ${d.total}</span></div>
+      <div class="steps">${dots}<span class="step-n">STEP ${d.step + 1} / ${d.total}</span></div>
       <div class="tut-head"><span class="tut-icon">${d.icon}</span><b>${d.title}</b></div>
       <div class="tut-body">${d.body}</div>
       <div class="tut-keys">${d.keys}</div>`;
     const row = h('div', 'tut-buttons');
     const next = h('button', 'btn primary small', d.step + 1 === d.total ? 'Start working' : 'Next');
     next.onclick = d.onNext;
-    const skip = h('button', 'btn small', 'Skip');
+    const skip = h('button', 'btn small', 'Skip tour');
     skip.onclick = d.onSkip;
     row.append(next, skip);
     el.appendChild(row);
@@ -303,30 +353,46 @@ export class Hud {
     this.tutorialEl.innerHTML = '';
   }
 
-  pause(onResume: () => void, onMute: () => void, muted: boolean, onQuit: () => void, onHelp?: () => void) {
-    const card = h('div', 'card', '<div class="card-title">Paused</div>');
-    if (onHelp) {
-      const help = h('button', 'btn', 'Controls');
-      help.onclick = onHelp;
-      card.appendChild(help);
-    }
+  // ------------------------------------------------------------------ pause
+  pause(onResume: () => void, onMute: () => void, muted: boolean, onQuit: () => void, onHelp?: () => void,
+    meta?: { dayLabel: string; hour: number; money: number; rep: number }) {
+    const stats = meta
+      ? `<div class="pause-stats">
+          <div><span>Day</span><b>${meta.dayLabel}</b></div>
+          <div><span>Time</span><b>${fmtHour(meta.hour)}</b></div>
+          <div><span>Cash</span><b class="gold">$${Math.floor(meta.money).toLocaleString()}</b></div>
+          <div><span>Rep</span><b class="gold">${stars(meta.rep)}</b></div>
+        </div>`
+      : '';
+    const card = h('div', 'card pause-card', `
+      <div class="card-title">Paused</div>
+      ${stats}
+      <div class="card-sub">The clock is stopped — the lawns will wait.</div>`);
     const opts: DialogOption[] = [
       { label: 'Resume', key: 'Esc', primary: true, onPick: onResume },
       { label: muted ? 'Sound on' : 'Sound off', key: 'M', onPick: onMute },
-      { label: 'Save & quit to title', key: 'Q', onPick: onQuit },
     ];
+    if (onHelp) opts.push({ label: 'Controls', key: 'K', onPick: onHelp });
+    opts.push({ label: 'Save & quit', key: 'Q', onPick: onQuit });
     card.appendChild(this.buttons(opts));
     this.open(card, opts, 'center');
   }
 
+  // --------------------------------------------------------------- schedule
   schedule(d: ScheduleData, onClose: () => void) {
-    const card = h('div', 'card wide', `<div class="card-title">📅 Week ${d.week} schedule</div>${scheduleGrid(d)}${forecastRow(d.forecast)}
-      <div class="legend"><span class="chip done">✓ done</span><span class="chip missed">✕ missed</span><span class="chip due">● due today</span><span class="chip later">booked</span></div>`);
+    const card = h('div', 'card wide', `
+      <div class="card-title">📅 Week ${d.week} schedule</div>
+      <div class="card-sub">Today is <b>${WEEKDAYS[d.today]}</b> — the highlighted column.</div>
+      ${scheduleGrid(d)}
+      <div class="legend"><span class="chip done">✓ done</span><span class="chip missed">✕ missed</span><span class="chip due">● due today</span><span class="chip later">booked</span></div>
+      <div class="section">Forecast</div>
+      ${forecastRow(d.forecast)}`);
     const opts: DialogOption[] = [{ label: 'Back to work', key: 'C', primary: true, onPick: onClose }, { label: '', key: 'Esc', onPick: onClose }];
     card.appendChild(this.buttons(opts.slice(0, 1)));
     this.open(card, opts, 'center');
   }
 
+  // ----------------------------------------------------------------- evening
   /** End of the working day: summary, the week ahead, the forecast, then the shop. */
   evening(o: {
     title: string; earned: number; jobs: number; lines: string[]; money: number; rep: number;
@@ -353,22 +419,22 @@ export class Hud {
       const lvl = o.up[u.key], cost = u.costs[lvl];
       const maxed = cost === undefined;
       const b = h('button', `item${!maxed && o.money >= cost ? '' : ' dim'}`, `
+        <span class="k">${i + 1}</span>
         <span class="icon">${u.icon}</span>
         <span class="name">${u.name}<small>${u.desc}</small></span>
         <span class="lvl">${'●'.repeat(lvl)}${'○'.repeat(u.costs.length - lvl)}</span>
-        <span class="price">${maxed ? 'MAX' : `$${cost}`}</span>
-        <span class="k">${i + 1}</span>`);
+        <span class="price">${maxed ? 'MAX' : `$${cost}`}</span>`);
       b.onclick = () => o.onBuy(u.key);
       shop.appendChild(b);
       opts.push({ label: '', key: String(i + 1), onPick: () => o.onBuy(u.key) });
     });
     const hk = String(UPGRADES.length + 1);
     const crew = h('button', `item${o.crew.cost !== null && o.money >= o.crew.cost ? '' : ' dim'}`, `
+      <span class="k">${hk}</span>
       <span class="icon">👷</span>
       <span class="name">Hire crew<small>Mows your booked lawns for you · $${o.crew.wage}/day wage each</small></span>
       <span class="lvl">${'●'.repeat(o.crew.count)}${'○'.repeat(o.crew.max - o.crew.count)}</span>
-      <span class="price">${o.crew.cost === null ? 'FULL' : `$${o.crew.cost}`}</span>
-      <span class="k">${hk}</span>`);
+      <span class="price">${o.crew.cost === null ? 'FULL' : `$${o.crew.cost}`}</span>`);
     crew.onclick = o.onHire;
     shop.appendChild(crew);
     opts.push({ label: '', key: hk, onPick: o.onHire });
